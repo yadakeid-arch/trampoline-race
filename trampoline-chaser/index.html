@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>TRAMPOLINE CHASER 3D</title>
+<meta name="description" content="トランポリンで跳ねて、空に浮かぶおもちゃ工場のコースを駆け抜ける3Dレースゲーム。最大6人でオンライン対戦できます。">
+<meta property="og:title" content="TRAMPOLINE CHASER 3D">
+<meta property="og:description" content="トランポリンで跳ねて、空に浮かぶおもちゃ工場のコースを駆け抜ける3Dレースゲーム。最大6人でオンライン対戦。">
+<meta property="og:type" content="website">
+<meta property="og:image" content="assets/og.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#03040c">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="wrap">
+  <canvas id="gl"></canvas>
+
+  <div id="tint"></div>
+
+  <div id="hud">
+    <div class="hudTop">
+      <div id="hStage">STAGE 1</div>
+      <div id="hScore">0</div>
+      <div id="hLives">&#9829;&#9829;&#9829;&#9829;</div>
+    </div>
+    <div id="hSub">
+      <div id="hFloor"></div>
+      <div id="hBonus"></div>
+      <div id="hPower"></div>
+    </div>
+    <div id="cross"></div>
+    <div id="dashBar"><div id="dashFill"></div></div>
+    <div id="waveBar"><div id="waveFill"></div></div>
+    <div id="waveKey">CLICK : WAVE　V : VIEW　R : CHECKPOINT</div>
+  </div>
+
+  <div id="raceBar">
+    <div id="rbRank">-</div>
+    <div id="rbTime">0.0</div>
+    <div id="rbLeft">-</div>
+  </div>
+  <div id="stunMsg">STUNNED</div>
+  <div id="goalMsg">GOAL!<small></small></div>
+  <div id="specMsg"></div>
+  <div id="abilBar"></div>
+  <div id="roulette">
+    <div id="rouIcon">?</div>
+    <div id="rouName">???</div>
+    <div id="rouWho"></div>
+  </div>
+  <div id="count"><span>3</span></div>
+  <div id="toast"></div>
+
+  <div id="touch">
+    <div id="stickBase"></div>
+    <div id="stickKnob"></div>
+    <div id="touchHint">左半分＝移動　　右半分＝視点</div>
+    <div id="waveBtn">WAVE</div>
+    <div id="viewBtn">1ST</div>
+  </div>
+
+  <div id="pause">
+    <div class="p1">MOUSE STEER</div>
+    <div class="p2">カーソルを画面の端へ動かすと旋回　／　クリックでマウス視点に切替</div>
+  </div>
+
+  <div class="screen" id="scTitle">
+  <div class="card">
+    <h1><span class="w"><span style="--c:#ff5a5f;--d:0.00s">T</span><span style="--c:#ff9f1a;--d:0.06s">R</span><span style="--c:#ffd23d;--d:0.12s">A</span><span style="--c:#4cd964;--d:0.18s">M</span><span style="--c:#3fb7ff;--d:0.24s">P</span><span style="--c:#a66bff;--d:0.30s">O</span><span style="--c:#ff5a5f;--d:0.36s">L</span><span style="--c:#ff9f1a;--d:0.42s">I</span><span style="--c:#ffd23d;--d:0.48s">N</span><span style="--c:#4cd964;--d:0.54s">E</span></span><br><span class="w"><span style="--c:#3fb7ff;--d:0.60s">C</span><span style="--c:#a66bff;--d:0.66s">H</span><span style="--c:#ff5a5f;--d:0.72s">A</span><span style="--c:#ff9f1a;--d:0.78s">S</span><span style="--c:#ffd23d;--d:0.84s">E</span><span style="--c:#4cd964;--d:0.90s">R</span></span></h1>
+    <div class="tag">3D</div>
+    <div class="sub">
+      おもちゃ工場の空に浮かぶコースを、<span class="o">トランポリン</span>で跳んで進め<br>
+      跳んでいる間は<b>好きな方へ動ける</b> ― 浮いている床に飛び乗って <b>GOAL</b> へ<br>
+      落ちても<b>チェックポイントの旗</b>から再スタート<br>
+      <span style="color:#5a6b7c">WASD / 矢印＝移動　マウス＝視点　Q / E＝旋回　R＝旗まで戻る<br>左クリック＝波動（正面45度・射程20m）　V＝視点切替（一人称／三人称）　M＝消音</span>
+    </div>
+    <input class="field" id="myName" maxlength="8" placeholder="なまえ">
+    <div class="skinLabel" id="skinLabel">CHARACTER</div>
+    <div class="skinPick" id="skinPick"></div>
+    <div id="stageSel"><button id="stagePrev">&#9664;</button><div><div id="stageNum">STAGE 1</div><div id="stageBest"></div></div><button id="stageNext">&#9654;</button></div>
+    <button class="menu-btn" id="btnPlay">1人でタイムアタック</button>
+    <button class="menu-btn green" id="btnCreate">ルームを作る</button>
+    <button class="menu-btn dim" id="btnJoinOpen">ルームに入る</button>
+  </div>
+  </div>
+
+  <!-- ルームに入る -->
+  <div class="screen hidden" id="scJoin">
+  <div class="card">
+    <h2>ルームに入る</h2>
+    <div class="hint">ホストから聞いた4桁のコードを入力</div>
+    <input class="field" id="joinCode" inputmode="numeric" maxlength="4" placeholder="0000">
+    <div id="netMsg"></div>
+    <button class="menu-btn" id="btnJoinGo">接続する</button>
+    <button class="menu-btn dim" id="btnJoinBack">もどる</button>
+  </div>
+  </div>
+
+  <!-- ロビー -->
+  <div class="screen hidden" id="scRoom">
+  <div class="card">
+    <div class="hint codeLabel">ROOM CODE</div>
+    <div id="roomCode">----</div>
+    <div class="hint" id="roomHint">このコードを教えて集まってもらおう（最大6人）</div>
+    <div class="skinLabel">CHARACTER</div>
+    <div class="skinPick" id="skinPick2"></div>
+    <div id="playerList"></div>
+    <div id="netMsg2"></div>
+    <button class="menu-btn green" id="btnRaceStart">レース開始</button>
+    <button class="menu-btn dim" id="btnLeaveRoom">退出する</button>
+  </div>
+  </div>
+
+  <!-- レース結果 -->
+  <div class="screen hidden" id="scResult">
+  <div class="card">
+    <h2 id="resTitle">RESULT</h2>
+    <div class="colhead"><span class="rk">順位</span><span class="nm">プレイヤー</span><span class="tm">タイム</span><span class="pt">ポイント</span><span class="lv">ライフ</span></div>
+    <div id="resTable"></div>
+    <div id="champ"></div>
+    <div class="label">TOTAL</div>
+    <div id="totalTable"></div>
+    <div style="height:18px"></div>
+    <button class="menu-btn green" id="btnNextRace">次のレース</button>
+    <button class="menu-btn dim" id="btnResultLeave">退出する</button>
+  </div>
+  </div>
+
+  <div class="screen hidden" id="scClear">
+  <div class="card">
+    <h2>GOAL!</h2>
+    <div class="big" id="clearAdded"></div>
+    <div class="stat" id="clearTotal"></div>
+    <div class="stat" id="clearLives"></div>
+    <div class="note" id="clearExtra"></div>
+    <div style="height:16px"></div>
+    <button class="menu-btn green" id="btnNext">NEXT STAGE</button>
+    <button class="menu-btn" id="btnRetry">もう一度</button>
+    <button class="menu-btn dim" id="btnClearTitle">TITLE</button>
+  </div>
+  </div>
+
+</div>
+
+<script src="js/vendor/three.min.js"></script>
+<script src="js/vendor/GLTFLoader.js"></script>
+<script src="js/vendor/SkeletonUtils.js"></script>
+<script src="js/vendor/peerjs.min.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

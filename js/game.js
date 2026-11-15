@@ -444,6 +444,8 @@ const GEO = {
   plane:  new THREE.PlaneGeometry(1, 1),
   ceil:   new THREE.PlaneGeometry(CELL, CELL).rotateX(Math.PI / 2),   // 下向きの板
   shadow: new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
+  megaRing: new THREE.RingGeometry(1.36, 1.8, 32).rotateX(-Math.PI / 2),
+  signPlane: new THREE.PlaneGeometry(2.6, 2.6).rotateX(-Math.PI / 2),
   cone:   new THREE.ConeGeometry(Math.tan(Math.PI * 22.5 / 180), 1, 18, 1, true)
 };
 
@@ -476,6 +478,9 @@ function disposeGroup(g) {
 
 const PEAK_MARGIN = 2.2;        // トランポリンの最高点は、着地先より少し上
 const PAD_R       = 1.25;       // トランポリンの半径
+const MEGA_R      = 1.7;        // スーパートランポリン（金色）：ふつうの数倍の高さまで跳ぶ
+const BOUNCY_R    = 1.55;       // ダイブトランポリン（ピンク）：高いところから落ちるほど高く跳ね返る
+const BOUNCY_BASE = 1.0;        // ダイブトランポリンに歩いて乗ったときの高さ（小さく跳ねるだけ）
 const LAUNCH_R    = 1.3;        // 発射台の半径
 const LAUNCH_VY   = 13;         // 発射台の上向きの初速
 const BOOST_DUR   = 1.6;        // 発射台で飛んだあと、着地してからの加速
@@ -560,11 +565,12 @@ function generateCourseOnce(D, seed) {
   function addPath(a, lat, y) { C.path.push(at(a, lat, y)); }
   function addPad(P, a, lat, dh) {
     const q = at(a, lat, P.y);
-    C.pads.push({ plat: P, ox: q.x - P.x, oz: q.z - P.z, jv: padJV(dh), dh: dh, anim: 0 });
+    C.pads.push({ plat: P, ox: q.x - P.x, oz: q.z - P.z, jv: padJV(dh), dh: dh, anim: 0, kind: 'normal', r: PAD_R });
+    return C.pads[C.pads.length - 1];
   }
   function addCP(P, a) {
     const q = at(a, 0, P.y);
-    C.cps.push({ x: q.x, y: P.y, z: q.z, yaw: Math.atan2(-hx, -hz), plat: P });
+    C.cps.push({ x: q.x, y: P.y, z: q.z, yaw: Math.atan2(-hx, -hz), plat: P, seg: curSeg });
     R('walk', q, { cp: C.cps.length - 1 });
   }
   function addGem(a, lat, y) { const q = at(a, lat, y); C.gems.push({ x: q.x, y: y, z: q.z }); }
@@ -589,7 +595,8 @@ function generateCourseOnce(D, seed) {
   const S0 = 15;
   C.plats.push({ x: 0, z: 0, y: 0, w: S0, d: S0, t: 1.2, col: 0xfff1b8, kind: 'plat', cx: 0, cz: 0, cy: 0, dx: 0, dz: 0, dy: 0, gone: false, start: true, seg: -1 });
   C.start = { x: 0, y: 0, z: 0, yaw: 0 };
-  C.cps.push({ x: 0, y: 0, z: 0, yaw: 0, plat: C.plats[0] });
+  C.cps.push({ x: 0, y: 0, z: 0, yaw: 0, plat: C.plats[0], seg: -1 });
+  C.signs = [];
   C.path.push({ x: 0, y: 0, z: 0 });
   advance(S0 / 2, 0);
 
@@ -597,9 +604,10 @@ function generateCourseOnce(D, seed) {
   const types = [];
   const pool = (i) => {
     const t = ['climb', 'climb'];
-    if (D >= 1) t.push('islands', 'launch', 'conveyor');
+    if (D >= 1) t.push('islands', 'launch', 'conveyor', 'mega', 'dive');
     if (D >= 2) t.push('mover', 'crumble', 'rotor', 'islands');
-    if (D >= 3) t.push('elevator', 'launch', 'rotor');
+    if (D >= 3) t.push('elevator', 'launch', 'rotor', 'mega');
+    if (D >= 4) t.push('dive');
     if (D >= 5) t.push('islands', 'crumble', 'mover');
     if (py > 7) t.push('drop');
     return t;
@@ -608,7 +616,7 @@ function generateCourseOnce(D, seed) {
   for (let i = 0; i < nSeg; i++) {
     let ty;
     // 1面目は登りと発射台だけで、分かりやすく
-    if (D === 0) ty = (i % 2 === 0) ? 'climb' : (i === 3 ? 'drop' : 'runclimb');
+    if (D === 0) ty = i === nSeg - 1 ? 'mega' : (i % 2 === 0) ? 'climb' : (i === 3 ? 'drop' : 'runclimb');
     else { do { ty = pick(pool(i)); } while (ty === last && rnd() < 0.7); }
     if (ty === 'drop' && py < 7) ty = 'climb';
     last = ty;
@@ -801,6 +809,46 @@ function generateCourseOnce(D, seed) {
       plat(appLen + Sz, appLen + Sz + bLen, 0, W, py);
       advance(appLen + Sz + bLen, py);
 
+    } else if (ty === 'mega') {
+      // スーパートランポリンで、空高く浮かぶ床へ
+      const dh = D === 0 ? rr(15, 18) : rr(16, Math.min(22 + D * 2.5, 40));
+      const reach = padReach(dh);
+      const padA = appLen - 2.2;
+      const gap = Math.max(2.5, Math.min(rr(4, 6 + D * 0.8), reach * 0.75 - 2.2 - 3.5));
+      const pd = addPad(A, padA, 0, dh);
+      pd.kind = 'mega'; pd.r = MEGA_R;
+      const bLen = 12;
+      const b0 = appLen + gap;
+      const B = plat(b0, b0 + bLen, 0, W + 2, py + dh, { t: 1.0 });
+      R('walk', at(padA, 0, py)); R('pad', at(b0 + 3.5, 0, py + dh), { plat: B });
+      addGem(b0 + 6, 0, py + dh);
+      addPath(appLen, 0, py + dh * 0.6);
+      addPath(b0 + bLen / 2, 0, py + dh);
+      advance(b0 + bLen, py + dh);
+
+    } else if (ty === 'dive') {
+      // 床の端から飛び降り、下のピンクのトランポリンへ。落ちた高さのぶん高く跳ね返る
+      const drop = rr(9, Math.min(13 + D * 1.3, 26));
+      const up = rr(3, Math.min(6 + D * 0.35, 9));
+      const s = 4.0;
+      const tf = Math.sqrt(2 * drop / GRAVITY);
+      const fall = Math.max(s / 2 + 1.5, Math.min(rr(3, 6), tf * AIR_SPEED * 0.6) + s / 2);
+      const ia = appLen + fall;
+      const I = plat(ia - s / 2, ia + s / 2, 0, s, py - drop, { col: 0xffc2de });
+      const pd = addPad(I, ia, 0, 0);
+      pd.kind = 'bouncy'; pd.r = BOUNCY_R; pd.drop = drop; pd.bonus = up + PEAK_MARGIN; pd.jv = padJV(BOUNCY_BASE - PEAK_MARGIN + 0.01);
+      const jvFull = Math.sqrt(2 * GRAVITY * (drop + up + PEAK_MARGIN));
+      const reach = (airTime(jvFull, drop + up)) * AIR_SPEED;
+      const gap = Math.max(1.5, Math.min(rr(2.5, 5), reach * 0.75 - s / 2 - 3));
+      const b0 = ia + s / 2 + gap;
+      const bLen = rr(9, 11);
+      const B = plat(b0, b0 + bLen, 0, W, py + up);
+      C.signs.push(Object.assign(at(appLen - 1.6, 0, py), { yaw: Math.atan2(-hx, -hz) }));
+      R('pad', at(ia, 0, py - drop), { plat: I }); R('pad', at(b0 + 2.8, 0, py + up), { plat: B });
+      addPath(ia, 0, py - drop * 0.4);
+      addPath(b0 + bLen / 2, 0, py + up);
+      advance(b0 + bLen, py + up);
+
     } else if (ty === 'drop') {
       // 下の床へ飛び降りる
       const dh = rr(4, 7);
@@ -827,6 +875,13 @@ function generateCourseOnce(D, seed) {
   C.goal = { x: gq.x, y: py, z: gq.z, yaw: Math.atan2(-hx, -hz) };
   addPath(appLen + GS * 0.62, 0, py);
   void Gp;
+
+  // ---- 落下と判定する高さ（チェックポイントごと。飛び降りる区間は深めに） ----
+  for (const c of C.cps) {
+    let lo = c.y;
+    for (const P of C.plats) if (P.seg === c.seg || P.seg === c.seg + 1) lo = Math.min(lo, P.y - (P.mv && P.mv.ay ? P.mv.amp : 0));
+    c.fallY = lo - 14;
+  }
 
   // ---- 進み具合の物差し（道を細かく区切った点列と累積距離） ----
   const dense = [];
@@ -921,7 +976,7 @@ function inPadColumn(x, z) {
   if (!G.d) return false;
   for (const pd of G.d.pads) {
     const q = padPos(pd);
-    if (Math.hypot(x - q.x, z - q.z) <= PAD_R + 0.3) return true;
+    if (Math.hypot(x - q.x, z - q.z) <= pd.r + 0.3) return true;
   }
   return false;
 }
@@ -968,8 +1023,9 @@ function updatePlayer(dt) {
       const yPrev = p.y, yNext = p.y + p.vy * h;
       const L = p.vy < 0 ? landingAt(p.x, p.z, yPrev, yNext) : null;
       if (L) {
+        p.impact = -p.vy;
         p.y = L.cy; p.vy = 0; p.onGround = true; p.on = L; p.lastOn = L;
-        G.shake = Math.min(0.5, G.shake + 0.12);
+        G.shake = Math.min(0.9, G.shake + 0.12 + Math.max(0, p.impact - 25) * 0.012);
         playLand();
         if (p.boost) { p.dash = Math.max(p.dash, BOOST_DUR); p.boost = false; }
       } else p.y = yNext;
@@ -980,12 +1036,23 @@ function updatePlayer(dt) {
     if (p.onGround && !(RACE.on && ABIL.nopad > 0)) {
       for (const pd of G.d.pads) {
         const q = padPos(pd);
-        if (pd.plat !== p.on || Math.hypot(p.x - q.x, p.z - q.z) > PAD_R) continue;
-        p.vy = pd.jv; p.onGround = false; p.on = null; pd.anim = 1;
-        G.fovKick = 1; playJump();
+        if (pd.plat !== p.on || Math.hypot(p.x - q.x, p.z - q.z) > pd.r) continue;
+        let jv = pd.jv;
+        if (pd.kind === 'bouncy' && p.impact > 4) {
+          // 落ちてきた勢いをそのまま返し、さらに少し上乗せする
+          jv = Math.max(jv, Math.sqrt(p.impact * p.impact + 2 * GRAVITY * pd.bonus));
+          showToast(p.impact > 18 ? 'BIG BOUNCE!' : 'BOUNCE!');
+          playBounce();
+        } else if (pd.kind === 'mega') {
+          showToast('SUPER JUMP!');
+          playMega();
+        }
+        p.vy = jv; p.onGround = false; p.on = null; pd.anim = 1;
+        G.fovKick = pd.kind === 'normal' ? 1 : 1.6; playJump();
         break;
       }
     }
+    if (p.onGround) p.impact = 0;
     if (p.onGround && !(RACE.on && ABIL.nopad > 0)) {
       for (const L of G.d.launchers) {
         const qx = L.plat.cx + L.ox, qz = L.plat.cz + L.oz;
@@ -1022,8 +1089,8 @@ function updatePlayer(dt) {
     }
   }
   // 落下 → 最後のチェックポイントから復帰
-  const cpY = G.d.cps[p.cp].y;
-  if (!p.onGround && (p.y < cpY - 18 || p.y < G.d.minY - 14)) respawnPlayer();
+  const cpc = G.d.cps[p.cp];
+  if (!p.onGround && (p.y < Math.min(cpc.y - 18, cpc.fallY) || p.y < G.d.minY - 14)) respawnPlayer();
 }
 
 function respawnPlayer() {
@@ -1196,6 +1263,32 @@ function makeShadowTexture() {
   return new THREE.CanvasTexture(c);
 }
 
+function makeMegaPadTexture() {
+  const [c, g] = texCanvas(256, 256);
+  const cols = ['#ff5a5f', '#ff9f1a', '#ffd23d', '#4cd964', '#3fb7ff', '#a66bff'];
+  for (let k = 0; k < 6; k++) { g.fillStyle = cols[k]; g.beginPath(); g.arc(128, 128, 128 - k * 19, 0, Math.PI * 2); g.fill(); }
+  g.fillStyle = '#fff'; starPath(g, 128, 128, 30, 13, 5); g.fill();
+  g.strokeStyle = '#ffffff'; g.lineWidth = 7;
+  for (let k = 0; k < 3; k++) { const y = 92 - k * 0; void y; }
+  return new THREE.CanvasTexture(c);
+}
+function makeBouncyPadTexture() {
+  const [c, g] = texCanvas(256, 256);
+  g.fillStyle = '#ff7ab8'; g.beginPath(); g.arc(128, 128, 128, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = '#ffffff'; g.lineWidth = 9;
+  for (const r of [100, 70, 40]) { g.beginPath(); g.arc(128, 128, r, 0, Math.PI * 2); g.stroke(); }
+  g.fillStyle = '#ffffff';
+  g.beginPath(); g.moveTo(128, 70); g.lineTo(168, 120); g.lineTo(145, 120); g.lineTo(145, 180); g.lineTo(111, 180); g.lineTo(111, 120); g.lineTo(88, 120); g.closePath(); g.fill();
+  return new THREE.CanvasTexture(c);
+}
+function makeDiveSignTexture() {
+  const [c, g] = texCanvas(128, 128);
+  g.clearRect(0, 0, 128, 128);
+  g.fillStyle = 'rgba(255,79,160,.92)';
+  for (const y0 of [14, 58]) { g.beginPath(); g.moveTo(14, y0); g.lineTo(64, y0 + 46); g.lineTo(114, y0); g.lineTo(94, y0); g.lineTo(64, y0 + 26); g.lineTo(34, y0); g.closePath(); g.fill(); }
+  return new THREE.CanvasTexture(c);
+}
+
 FLOOR_TEX.wrapS = FLOOR_TEX.wrapT = THREE.RepeatWrapping; FLOOR_TEX.needsUpdate = true;
 const CM = {
   top:     new THREE.MeshStandardMaterial({ map: FLOOR_TEX, vertexColors: true, roughness: 0.55, metalness: 0 }),
@@ -1205,6 +1298,14 @@ const CM = {
   toy:     new THREE.MeshStandardMaterial({ map: FLOOR_TEX, vertexColors: true, roughness: 0.6, metalness: 0 }),
   padSide: new THREE.MeshStandardMaterial({ color: 0x2b78d6, roughness: 0.4, metalness: 0.1 }),
   padTop:  new THREE.MeshBasicMaterial({ map: PAD_TEX }),
+  megaSide: new THREE.MeshStandardMaterial({ color: 0xff8a00, roughness: 0.35, metalness: 0.2, emissive: 0x803000, emissiveIntensity: 0.3 }),
+  megaTop:  new THREE.MeshBasicMaterial({ map: makeMegaPadTexture() }),
+  megaBeam: new THREE.MeshBasicMaterial({ color: 0xffd23d, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false }),
+  megaRing: new THREE.MeshBasicMaterial({ color: 0xffc400, transparent: true, opacity: 0.75, side: THREE.DoubleSide, depthWrite: false }),
+  bounSide: new THREE.MeshStandardMaterial({ color: 0xff4fa0, roughness: 0.35, metalness: 0.1 }),
+  bounTop:  new THREE.MeshBasicMaterial({ map: makeBouncyPadTexture() }),
+  bounBeam: new THREE.MeshBasicMaterial({ color: 0xff6fb5, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false }),
+  diveSign: new THREE.MeshBasicMaterial({ map: makeDiveSignTexture(), transparent: true, depthWrite: false }),
   arrow:   new THREE.MeshBasicMaterial({ map: makeArrowPadTexture() }),
   biscuit: new THREE.MeshStandardMaterial({ map: makeBiscuitTexture(), roughness: 0.9, metalness: 0 }),
   mover:   new THREE.MeshStandardMaterial({ color: 0x8ee3ff, roughness: 0.4, metalness: 0.05, emissive: 0x2a6f88, emissiveIntensity: 0.25 }),
@@ -1324,6 +1425,14 @@ function buildStage(si, seed) {
       const x = P.x + (P.w > P.d ? P.w * off : 0), z = P.z + (P.w > P.d ? 0 : P.d * off);
       const h = P.y - P.t - gy;
       if (h < 1) continue;
+      // 真下に別の床があれば柱は立てない（床やトランポリンを突き抜けて見えるため）
+      let blocked = false;
+      for (const Q of d.plats) {
+        if (Q === P || Q.y >= P.y - 0.5) continue;
+        const qx = Q.w / 2 + (Q.mv && Q.mv.ax ? Q.mv.amp : 0) + 0.6, qz = Q.d / 2 + (Q.mv && Q.mv.az ? Q.mv.amp : 0) + 0.6;
+        if (Math.abs(x - Q.x) < qx && Math.abs(z - Q.z) < qz) { blocked = true; break; }
+      }
+      if (blocked) continue;
       const m = new THREE.Mesh(poleGeo, CM.pole);
       m.scale.set(0.35, h, 0.35);
       m.position.set(x, gy + h / 2, z);
@@ -1366,12 +1475,45 @@ function buildStage(si, seed) {
 
   // ---- トランポリン ----
   const padGeo = new THREE.CylinderGeometry(PAD_R, PAD_R + 0.1, 0.32, 24);
+  const megaGeo = new THREE.CylinderGeometry(MEGA_R, MEGA_R + 0.25, 0.5, 32);
+  const bounGeo = new THREE.CylinderGeometry(BOUNCY_R, BOUNCY_R + 0.15, 0.4, 28);
+  G.megaFx = [];
   for (const pd of d.pads) {
     const q = padPos(pd);
-    const m = new THREE.Mesh(padGeo, [CM.padSide, CM.padTop, CM.padSide]);
-    m.position.set(q.x, q.y + 0.16, q.z);
+    const kind = pd.kind || 'normal';
+    const m = kind === 'mega' ? new THREE.Mesh(megaGeo, [CM.megaSide, CM.megaTop, CM.megaSide])
+            : kind === 'bouncy' ? new THREE.Mesh(bounGeo, [CM.bounSide, CM.bounTop, CM.bounSide])
+            : new THREE.Mesh(padGeo, [CM.padSide, CM.padTop, CM.padSide]);
+    pd.h = kind === 'mega' ? 0.5 : kind === 'bouncy' ? 0.4 : 0.32;
+    m.position.set(q.x, q.y + pd.h / 2, q.z);
     grp.add(m);
     pd.mesh = m;
+    if (kind === 'mega') {
+      // 上へ昇っていく光の輪で「ここから空へ」を知らせる
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(MEGA_R * 0.9, MEGA_R * 0.9, 1, 20, 1, true), CM.megaBeam);
+      const bh = Math.min(pd.dh, 26);
+      beam.scale.y = bh; beam.position.set(q.x, q.y + bh / 2, q.z);
+      grp.add(beam);
+      const rings = [];
+      for (let k = 0; k < 4; k++) {
+        const rg = new THREE.Mesh(GEO.megaRing, CM.megaRing);
+        rg.position.set(q.x, q.y, q.z); grp.add(rg); rings.push(rg);
+      }
+      G.megaFx.push({ pd: pd, rings: rings, bh: bh });
+    } else if (kind === 'bouncy') {
+      // 上の床から見つけやすいように、ピンクの光の柱を立てる
+      const bh = (pd.drop || 8) + 2;
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(BOUNCY_R * 0.85, BOUNCY_R * 0.85, 1, 20, 1, true), CM.bounBeam);
+      beam.scale.y = bh; beam.position.set(q.x, q.y + bh / 2, q.z);
+      grp.add(beam);
+    }
+  }
+  // 飛び降りる場所の目印（床に描いた下向きの矢印）
+  for (const sg of d.signs || []) {
+    const m = new THREE.Mesh(GEO.signPlane, CM.diveSign);
+    m.position.set(sg.x, sg.y + 0.03, sg.z);
+    m.rotation.y = sg.yaw;
+    grp.add(m);
   }
   // ---- 発射台 ----
   for (const L of d.launchers) {
@@ -1500,11 +1642,20 @@ function updateCourse(dt) {
     const c = rotorCenter(R);
     if (R.arms3) { R.arms3.rotation.y = -rotorAngle(R, t); R.arms3.parent.position.set(c.x, c.y, c.z); }
   }
+  for (const fx of G.megaFx || []) {
+    const q = padPos(fx.pd);
+    fx.rings.forEach((rg, k) => {
+      const u = ((t * 0.45 + k / fx.rings.length) % 1);
+      rg.position.set(q.x, q.y + 0.4 + u * fx.bh, q.z);
+      rg.scale.setScalar(1 - u * 0.35);
+    });
+  }
+  CM.megaRing.opacity = 0.75;
   for (const pd of d.pads) {
     const q = padPos(pd);
     pd.anim = Math.max(0, pd.anim - dt * 3);
     if (pd.mesh) {
-      pd.mesh.position.set(q.x, q.y + 0.16 - pd.anim * 0.08, q.z);
+      pd.mesh.position.set(q.x, q.y + (pd.h || 0.32) / 2 - pd.anim * 0.08, q.z);
       pd.mesh.scale.set(1 + pd.anim * 0.15, 1 - pd.anim * 0.5, 1 + pd.anim * 0.15);
     }
   }
@@ -1529,6 +1680,8 @@ function updateCourse(dt) {
 // ---------- 効果音（コース用） ----------
 function playLaunch()     { tone('sawtooth', 180, 1200, 0.35, 0.12); tone('sine', 300, 1600, 0.4, 0.12); }
 function playCheckpoint() { [784, 1047, 1319].forEach((f, i) => setTimeout(() => tone('triangle', f, f, 0.14, 0.15), i * 80)); }
+function playMega()       { tone('triangle', 260, 1500, 0.7, 0.16); setTimeout(() => tone('sine', 520, 2400, 0.5, 0.10), 90); }
+function playBounce()     { tone('sine', 200, 900, 0.35, 0.16); tone('triangle', 400, 1300, 0.3, 0.10); }
 function playFall()       { tone('sine', 900, 200, 0.45, 0.14); }
 function playCrumble()    { tone('square', 140, 60, 0.25, 0.10); }
 
