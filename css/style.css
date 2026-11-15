@@ -487,6 +487,10 @@
   #waveBtn.cool { background:#c6d3e0; color:#fff; box-shadow:0 5px 0 #9aabbd; }
   #viewBtn { border:none; background:rgba(255,255,255,.9); color:#1c95e6; box-shadow:0 4px 0 rgba(30,90,160,.35); font-weight:900; }
 
+  #ropeBtn { position:absolute; right:120px; bottom:150px; width:96px; height:96px; border-radius:50%; display:none; z-index:5;
+    align-items:center; justify-content:center; background:#ff5a9e; color:#fff; font-weight:900; font-size:16px; letter-spacing:2px;
+    box-shadow:0 6px 0 #c23272; }
+  body.touch.playing.hanging #ropeBtn { display:flex; }
   @media (max-height:680px) {
     .screen h1 { font-size:28px; }
     .card { padding:12px 18px 14px; }
@@ -498,8 +502,11 @@
     .skinPick button img { height:52px; }
     #stageSel { margin:2px 0 0; }
   }
+  .skinPick { flex-wrap:wrap; justify-content:center; max-width:100%; }
   @media (max-width:420px) {
     .screen h1 { font-size:30px; }
+    .skinPick { max-width:230px; }
+    .skinPick button { width:60px; }
     .card { padding:16px 14px; border-radius:22px; }
     .menu-btn { min-width:210px; }
   }

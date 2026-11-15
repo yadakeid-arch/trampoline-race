@@ -480,7 +480,16 @@ const PEAK_MARGIN = 2.2;        // トランポリンの最高点は、着地先
 const PAD_R       = 1.25;       // トランポリンの半径
 const MEGA_R      = 1.7;        // スーパートランポリン（金色）：ふつうの数倍の高さまで跳ぶ
 const BOUNCY_R    = 1.55;       // ダイブトランポリン（ピンク）：高いところから落ちるほど高く跳ね返る
-const BOUNCY_BASE = 1.0;        // ダイブトランポリンに歩いて乗ったときの高さ（小さく跳ねるだけ）
+const BOUNCY_BASE = 1.0;
+// ---- 機能の切り替え（ターザンロープとサブルートは、いったん止めている。true に戻せば復活する） ----
+const FEATURE_ROPE = false;     // ターザンロープ（つかむ・振る・はなす）
+const FEATURE_SUB  = false;     // メインルートの下のサブルート（ロープで進む階層）
+const ROPE_GRIP   = 1.75;       // ロープにぶら下がったときの、足元から手までの高さ
+const ROPE_GRAB_R = 0.9;        // この距離まで近づけばロープをつかむ
+const ROPE_PUMP   = 1.7;        // 前後の入力で振りを大きくする強さ
+const ROPE_MAXA   = 1.3;        // 振れ幅の上限（約75度）
+const ROPE_REGRAB = 0.45;       // 手をはなしてから同じロープをつかめるまで
+const ROPE_TIP    = 1.2;        // ロープの先端（静止時）は、乗ってきた床より少し上        // ダイブトランポリンに歩いて乗ったときの高さ（小さく跳ねるだけ）
 const LAUNCH_R    = 1.3;        // 発射台の半径
 const LAUNCH_VY   = 13;         // 発射台の上向きの初速
 const BOOST_DUR   = 1.6;        // 発射台で飛んだあと、着地してからの加速
@@ -506,19 +515,22 @@ function generateCourse(D, seed) {
   let C = null;
   for (let a = 0; a < 40; a++) {
     C = generateCourseOnce(D, (seed + a * 7919) | 0);
-    if (!courseOverlaps(C)) { C.tries = a + 1; return C; }
+    if (!courseOverlaps(C)) { C.tries = a + 1; break; }
   }
-  C.tries = 40;
+  if (!C.tries) C.tries = 40;
+  if (FEATURE_SUB) buildSubRoute(C, (seed ^ 0x5b17) | 0);
+  else C.subRoutes = [];
   return C;
 }
 function courseOverlaps(C) {
   const ps = C.plats;
   for (let i = 0; i < ps.length; i++) {
     const A = ps[i];
+    if (A.sub) continue;
     const ax = A.w / 2 + (A.mv && A.mv.ax ? A.mv.amp : 0) + 1.2, az = A.d / 2 + (A.mv && A.mv.az ? A.mv.amp : 0) + 1.2;
     for (let j = i + 1; j < ps.length; j++) {
       const B = ps[j];
-      if (Math.abs(B.seg - A.seg) < 2) continue;
+      if (B.sub || Math.abs(B.seg - A.seg) < 2) continue;
       if (Math.abs(B.y - A.y) > 18 + (A.mv && A.mv.ay ? A.mv.amp : 0) + (B.mv && B.mv.ay ? B.mv.amp : 0)) continue;
       const bx = B.w / 2 + (B.mv && B.mv.ax ? B.mv.amp : 0), bz = B.d / 2 + (B.mv && B.mv.az ? B.mv.amp : 0);
       if (Math.abs(A.x - B.x) < ax + bx && Math.abs(A.z - B.z) < az + bz) return true;
@@ -532,7 +544,7 @@ function generateCourseOnce(D, seed) {
   const ri = (n) => Math.floor(rnd() * n);
   const pick = (arr) => arr[ri(arr.length)];
 
-  const C = { D: D, plats: [], pads: [], launchers: [], rotors: [], gems: [], cps: [], path: [], segs: [], route: [] };
+  const C = { D: D, plats: [], pads: [], launchers: [], rotors: [], gems: [], cps: [], path: [], segs: [], route: [], track: [] };
   const R = (k, q, o) => C.route.push(Object.assign({ k: k, x: q.x, y: q.y, z: q.z }, o || {}));   // 自動走行テスト用の道順
   const nSeg   = Math.min(5 + Math.floor(D * 1.5), 22);
   const W      = Math.max(4.6, 8.6 - D * 0.4);            // 道の幅
@@ -571,10 +583,13 @@ function generateCourseOnce(D, seed) {
   function addCP(P, a) {
     const q = at(a, 0, P.y);
     C.cps.push({ x: q.x, y: P.y, z: q.z, yaw: Math.atan2(-hx, -hz), plat: P, seg: curSeg });
-    R('walk', q, { cp: C.cps.length - 1 });
+    R('walk', q, { cp: C.cps.length - 1, cpo: C.cps[C.cps.length - 1] });
   }
   function addGem(a, lat, y) { const q = at(a, lat, y); C.gems.push({ x: q.x, y: y, z: q.z }); }
-  function advance(a, ny) { const q = at(a, 0, ny); px = q.x; pz = q.z; py = ny; }
+  function advance(a, ny) {
+    if (a > 0.01) C.track.push({ x: px, z: pz, hx: hx, hz: hz, len: a, seg: curSeg });   // サブルート用に、道の通り道を記録
+    const q = at(a, 0, ny); px = q.x; pz = q.z; py = ny;
+  }
 
   // 既に置いた床と重ならないかの確認（高さが近いものだけ）
   function clearAhead(len, wid, y) {
@@ -596,7 +611,7 @@ function generateCourseOnce(D, seed) {
   C.plats.push({ x: 0, z: 0, y: 0, w: S0, d: S0, t: 1.2, col: 0xfff1b8, kind: 'plat', cx: 0, cz: 0, cy: 0, dx: 0, dz: 0, dy: 0, gone: false, start: true, seg: -1 });
   C.start = { x: 0, y: 0, z: 0, yaw: 0 };
   C.cps.push({ x: 0, y: 0, z: 0, yaw: 0, plat: C.plats[0], seg: -1 });
-  C.signs = [];
+  C.signs = []; C.ropes = [];
   C.path.push({ x: 0, y: 0, z: 0 });
   advance(S0 / 2, 0);
 
@@ -630,11 +645,11 @@ function generateCourseOnce(D, seed) {
       R('walk', at(cw / 2, 0, py));
       addPath(cw / 2, 0, py);
       // 曲がる向き：重ならない方を選ぶ
-      const save = [hx, hz, px, pz];
+      const save = [hx, hz, px, pz], tlen = C.track.length;
       const dirs = rnd() < 0.5 ? [1, -1] : [-1, 1];
       let ok = false;
       for (const s of dirs) {
-        hx = save[0]; hz = save[1]; px = save[2]; pz = save[3];
+        hx = save[0]; hz = save[1]; px = save[2]; pz = save[3]; C.track.length = tlen;
         // 角の中心へ移動してから向きを変える
         advance(cw / 2, py);
         const nhx = s > 0 ? -hz : hz, nhz = s > 0 ? hx : -hx;
@@ -642,7 +657,7 @@ function generateCourseOnce(D, seed) {
         advance(cw / 2, py);
         if (clearAhead(30, W + 4, py)) { ok = true; break; }
       }
-      if (!ok) { hx = save[0]; hz = save[1]; px = save[2]; pz = save[3]; advance(cw, py); }
+      if (!ok) { hx = save[0]; hz = save[1]; px = save[2]; pz = save[3]; C.track.length = tlen; advance(cw, py); }
       void corner;
     }
 
@@ -849,6 +864,44 @@ function generateCourseOnce(D, seed) {
       addPath(b0 + bLen / 2, 0, py + up);
       advance(b0 + bLen, py + up);
 
+    } else if (ty === 'rope' || ty === 'ropes') {
+      // ターザンロープ：振り子で谷を越える。長さは1本ずつちがう
+      const n = ty === 'ropes' ? 2 + (D >= 6 && rnd() < 0.5 ? 1 : 0) : 1;
+      const tipY = py + ROPE_TIP;
+      const dB = rr(0, Math.min(1.5 + D * 0.15, 3));
+      let a = appLen + rr(1.6, 2.6);         // 1本目の、静止時の位置
+      R('walk', at(appLen - 0.5, 0, py));
+      for (let k = 0; k < n; k++) {
+        const L = rr(4.5, Math.min(7 + D * 1.2, 17));
+        const last = k === n - 1;
+        // 最後のロープ：足が出口の床より上に来る角度＋少し。途中のロープ：次のロープへ手が届く角度
+        let need;
+        if (last) need = Math.max(0.5, Math.acos(Math.max(-1, 1 - Math.max(0.05, 1.45 - dB) / L))) + 0.15;
+        else need = rr(0.55, 0.75);
+        need = Math.min(need, 1.12);
+        const prevEdge = k === 0 ? appLen : null;
+        const back = k === 0 ? (a - prevEdge) + 0.6 : 1.2;
+        const idleA = Math.min(0.9, Math.asin(Math.min(0.85, back / L)));
+        const q = at(a, 0, tipY + L);
+        C.ropes.push({ ax: q.x, ay: q.y, az: q.z, L: L, dx: hx, dz: hz, idleA: idleA,
+          th: 0, om: 0, ph: rnd() * 6.28, need: need, cd: 0, seg: curSeg });
+        const ri = C.ropes.length - 1;
+        const fx = a + L * Math.sin(need);     // 振り切ったときの先端の位置
+        if (last) {
+          const bLen = 10;
+          const b0 = a + L * Math.sin(need - 0.15) + 0.2;
+          const B = plat(b0, b0 + bLen, 0, W, py - dB);
+          R('rope', at(fx, 0, py - dB), { rope: ri, plat: B });
+          R('pad', at(Math.max(b0 + 2.5, fx + 1), 0, py - dB), { plat: B });
+          addPath(a, 0, tipY); addPath(b0 + bLen / 2, 0, py - dB);
+          advance(b0 + bLen, py - dB);
+        } else {
+          R('rope', at(fx, 0, tipY), { rope: ri, next: true });
+          addPath(a, 0, tipY);
+          a = fx + rr(1.6, 2.6);
+        }
+      }
+
     } else if (ty === 'drop') {
       // 下の床へ飛び降りる
       const dh = rr(4, 7);
@@ -874,16 +927,25 @@ function generateCourseOnce(D, seed) {
   const gq = at(appLen + GS * 0.62, 0, py);
   C.goal = { x: gq.x, y: py, z: gq.z, yaw: Math.atan2(-hx, -hz) };
   addPath(appLen + GS * 0.62, 0, py);
+  C.track.push({ x: px, z: pz, hx: hx, hz: hz, len: appLen + GS * 0.62, seg: nSeg });
   void Gp;
 
+  finishCourseShape(C, true);
+  return C;
+}
+
+// 落下判定の高さ・進み具合の物差し・範囲（サブルートを足したあとにも計算し直す）
+function finishCourseShape(C, withProg) {
   // ---- 落下と判定する高さ（チェックポイントごと。飛び降りる区間は深めに） ----
   for (const c of C.cps) {
     let lo = c.y;
     for (const P of C.plats) if (P.seg === c.seg || P.seg === c.seg + 1) lo = Math.min(lo, P.y - (P.mv && P.mv.ay ? P.mv.amp : 0));
+    for (const r of C.ropes) if (!r.dead && (r.seg === c.seg || r.seg === c.seg + 1)) lo = Math.min(lo, r.ay - r.L - ROPE_GRIP - 3);
     c.fallY = lo - 14;
   }
 
   // ---- 進み具合の物差し（道を細かく区切った点列と累積距離） ----
+  if (withProg) {
   const dense = [];
   for (let i = 0; i < C.path.length; i++) {
     const a = C.path[i], b = C.path[i + 1];
@@ -900,6 +962,7 @@ function generateCourseOnce(D, seed) {
   dense.forEach((p, i) => { if (i > 0) s += Math.hypot(p.x - dense[i - 1].x, p.y - dense[i - 1].y, p.z - dense[i - 1].z); p.s = s; });
   C.prog = dense;
   C.length = s;
+  }
 
   // ---- 範囲 ----
   let minY = 0, maxY = 0, x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9;
@@ -909,9 +972,269 @@ function generateCourseOnce(D, seed) {
     x0 = Math.min(x0, P.x - P.w / 2); x1 = Math.max(x1, P.x + P.w / 2);
     z0 = Math.min(z0, P.z - P.d / 2); z1 = Math.max(z1, P.z + P.d / 2);
   }
+  for (const r of C.ropes) maxY = Math.max(maxY, r.ay);
   C.minY = minY; C.maxY = maxY; C.bounds = { x0: x0, x1: x1, z0: z0, z1: z1 };
   C.groundY = minY - 26;
-  return C;
+}
+
+
+// ===================== サブルート（メインルートの下を、ターザンロープで進む） =====================
+// メインルートの床の裏からロープが垂れ下がり、その下の階層を振り子で渡っていく。
+// ところどころのスーパートランポリンで、真上のメインルートへ戻れる。
+const SUB_COLS = [0xb197fc, 0x63e6be, 0x74c0fc, 0xffa8a8, 0xffd8a8];
+function buildSubRoute(C, seed) {
+  const rnd = mulberry32(seed);
+  const rr = (a, b) => a + (b - a) * rnd();
+  const D = C.D;
+  C.subRoutes = [];
+  // ---- 道の通り道を、向きごとの直線にまとめる ----
+  const runs = [];
+  for (const t of C.track) {
+    const last = runs[runs.length - 1];
+    if (last && last.hx === t.hx && last.hz === t.hz &&
+        Math.abs(last.x + last.hx * last.len - t.x) < 0.05 && Math.abs(last.z + last.hz * last.len - t.z) < 0.05) last.len += t.len;
+    else runs.push({ x: t.x, z: t.z, hx: t.hx, hz: t.hz, len: t.len, seg: t.seg });
+  }
+  let U = 0;
+  for (const r of runs) { r.u0 = U; U += r.len; r.u1 = U; }
+  if (!runs.length) return;
+  const corners = runs.slice(1).map(r => r.u0);
+  const runAt = (u) => { for (const r of runs) if (u <= r.u1) return r; return runs[runs.length - 1]; };
+  const pt = (u, lat) => {
+    const r = u < 0 ? runs[0] : runAt(u), a = u - r.u0;      // 範囲の外は、端の直線をそのまま延ばす
+    return { x: r.x + r.hx * a - r.hz * (lat || 0), z: r.z + r.hz * a + r.hx * (lat || 0), r: r };
+  };
+  const mainPlats = C.plats.filter(P => !P.sub);
+  // その地点の真上にあるメインの床（動く床・崩れる床は、ロープを吊るせないので除く）
+  const above = (x, z, margin) => {
+    const out = [];
+    for (const P of mainPlats) {
+      if (P.kind === 'mover' || P.kind === 'crumble') continue;
+      if (Math.abs(x - P.x) <= P.w / 2 - margin && Math.abs(z - P.z) <= P.d / 2 - margin) out.push(P);
+    }
+    return out;
+  };
+
+  // ---- サブルートを敷く区間を選ぶ：真上の床の高さの差が小さい範囲 ----
+  const BAND = 10.5;
+  const samples = [];
+  for (let u = 0; u <= U; u += 1) {
+    const q = pt(u);
+    const ab = above(q.x, q.z, 0.4);
+    let lo = Infinity;
+    for (const P of ab) lo = Math.min(lo, P.y - P.t);
+    samples.push({ u: u, x: q.x, z: q.z, lo: lo, ab: ab });
+  }
+  const stretches = [];
+  let i = 0;
+  while (i < samples.length) {
+    while (i < samples.length && samples[i].lo === Infinity) i++;
+    if (i >= samples.length) break;
+    let mn = samples[i].lo, mx = samples[i].lo, j = i, lastCov = i;
+    while (j + 1 < samples.length) {
+      const s = samples[j + 1];
+      if (s.lo !== Infinity) {
+        const nmn = Math.min(mn, s.lo), nmx = Math.max(mx, s.lo);
+        if (nmx - nmn > BAND) break;
+        mn = nmn; mx = nmx; lastCov = j + 1;
+      } else if (j + 1 - lastCov > 16) break;        // 真上に床のない所が長く続くなら区切る
+      j++;
+    }
+    const st = { a: samples[i].u, b: samples[lastCov].u, lo: mn };
+    if (st.b - st.a >= 26) stretches.push(st);
+    i = lastCov + 6;
+  }
+
+  stretches.forEach((st, si) => {
+    const Lmin = rr(4.8, 6.4);
+    let Ys = st.lo - ROPE_TIP - Lmin;
+    const Ws = Math.max(6, (D < 3 ? 11 : 10.5 - D * 0.35));
+    // ほかの区間のメインの床と、同じくらいの高さでぶつかるなら手前で打ち切る
+    for (const s of samples) {
+      if (s.u < st.a - 8 || s.u > st.b + 4) continue;
+      let hit = false;
+      for (const P of mainPlats) {
+        if (P.y < Ys - 3.5 || P.y > Ys + 3.8) continue;
+        if (Math.abs(s.x - P.x) < P.w / 2 + Ws / 2 + 0.5 && Math.abs(s.z - P.z) < P.d / 2 + Ws / 2 + 0.5) { hit = true; break; }
+      }
+      if (hit) { if (s.u <= st.a + 4) { st.dead = true; } else st.b = Math.min(st.b, s.u - 8); break; }
+    }
+    if (st.dead || st.b - st.a < 22) return;
+    // 出口（区間の終わり）は真上に床がある地点に合わせる
+    while (st.b > st.a + 20) { const q = pt(st.b); if (above(q.x, q.z, 1.8).some(P => P.y - P.t > Ys + 5)) break; st.b -= 1; }
+    if (st.b - st.a < 20) return;
+
+    const subPlats = [], steps = [];
+    let colI = si;
+    const seg0 = runAt(st.a).seg;
+    const mk = (u0, u1, o) => {
+      // [u0,u1] を道に沿って床にする（曲がり角では四角い床でつなぐ）
+      const made = [];
+      let a = u0;
+      const cs = corners.filter(c => c > u0 - 0.01 && c < u1 + 0.01);
+      const cuts = [];
+      for (const c of cs) cuts.push(c);
+      const pieces = [];
+      for (const c of cuts) { pieces.push([a, c - Ws / 2]); a = c + Ws / 2; }
+      pieces.push([a, u1]);
+      for (const [p0, p1] of pieces) {
+        if (p1 - p0 < 0.3) continue;
+        const r = runAt((p0 + p1) / 2), m = pt((p0 + p1) / 2);
+        const len = p1 - p0, alongX = r.hx !== 0;
+        made.push(Object.assign({ x: m.x, z: m.z, y: Ys, w: alongX ? len : Ws, d: alongX ? Ws : len, t: 0.8,
+          col: SUB_COLS[colI % SUB_COLS.length], kind: 'plat', cx: m.x, cz: m.z, cy: Ys, dx: 0, dz: 0, dy: 0,
+          gone: false, seg: r.seg, sub: true }, o || {}));
+      }
+      for (const c of cs) {
+        const q = pt(c);
+        made.push({ x: q.x, z: q.z, y: Ys, w: Ws, d: Ws, t: 0.8, col: SUB_COLS[colI % SUB_COLS.length], kind: 'plat',
+          cx: q.x, cz: q.z, cy: Ys, dx: 0, dz: 0, dy: 0, gone: false, seg: runAt(c).seg, sub: true });
+      }
+      for (const P of made) { C.plats.push(P); subPlats.push(P); }
+      return made;
+    };
+    const walkTo = (fromU, toU, y) => {
+      for (const c of corners) if (c > fromU + 0.5 && c < toU - 0.5) { const q = pt(c); steps.push({ k: 'walk', x: q.x, y: y, z: q.z }); }
+      const q = pt(toU); steps.push({ k: 'walk', x: q.x, y: y, z: q.z });
+    };
+    const platAtU = (u) => { const q = pt(u); return subPlats.find(P => !P.gone && Math.abs(q.x - P.x) <= P.w / 2 && Math.abs(q.z - P.z) <= P.d / 2); };
+    const addCP = (u) => {
+      const q = pt(u), P = platAtU(u);
+      if (!P) return null;
+      const r = runAt(u);
+      const c = { x: q.x, y: Ys, z: q.z, yaw: Math.atan2(-r.hx, -r.hz), plat: P, seg: r.seg, sub: true };
+      C.cps.push(c);
+      return c;
+    };
+
+    // ---- 入口：メインの床の下に広い床 ----
+    const entryBack = st.a < 1 ? 8 : 3;
+    let ps = st.a - entryBack, cur = st.a + 8;
+    let ropes = 0, lastU = st.a;
+    const route = { steps: steps, entryU: st.a + 2, Ys: Ys };
+    let pendingCP = true;
+    while (cur < st.b - 4) {
+      // ロープを吊るせる地点を探す（真上のメインの床の裏）
+      let found = null;
+      for (let r = cur + 1.6; r <= cur + 8 && r < st.b - 6; r += 0.5) {
+        const q = pt(r);
+        const ab = above(q.x, q.z, 0.5).filter(P => P.y - P.t >= Ys + ROPE_TIP + 4.5 && P.y - P.t <= Ys + ROPE_TIP + 17.5);
+        if (!ab.length) continue;
+        let Q = ab[0]; for (const P of ab) if (P.y < Q.y) Q = P;
+        const L = (Q.y - Q.t) - (Ys + ROPE_TIP);
+        let need = Math.max(0.5, Math.acos(Math.max(-1, 1 - 1.45 / L))) + 0.15;
+        need = Math.min(need, 1.12);
+        const extra = D >= 2 ? rr(0, Math.min(3, 0.4 * D)) : 0;
+        const aEnd = Math.max(cur, r - rr(1.6, 2.4));
+        const gEnd = r + L * Math.sin(need - 0.15) + 0.2 + extra;
+        if (gEnd + 3.5 > st.b + 3) break;
+        if (corners.some(c => c > aEnd - Ws / 2 - 0.5 && c < gEnd + Ws / 2 + 3.5)) continue;
+        found = { r: r, Q: Q, L: L, need: need, aEnd: aEnd, gEnd: gEnd };
+        break;
+      }
+      if (!found) { cur += 2.5; continue; }
+      // 手前の床を確定
+      mk(ps, found.aEnd);
+      if (pendingCP) { const c = addCP(Math.min(found.aEnd - 1, ps + 4)); if (c) route.cp = route.cp || c; pendingCP = false; }
+      walkTo(lastU, found.aEnd - 0.5, Ys);
+      const rr0 = pt(found.r), run = runAt(found.r);
+      C.ropes.push({ ax: rr0.x, ay: found.Q.y - found.Q.t, az: rr0.z, L: found.L, dx: run.hx, dz: run.hz,
+        idleA: Math.min(0.9, Math.asin(Math.min(0.85, (found.r - found.aEnd + 0.6) / found.L))),
+        th: 0, om: 0, ph: rnd() * 6.28, need: found.need, cd: 0, seg: run.seg, mount: true, sub: true, stretch: si });
+      const ri = C.ropes.length - 1;
+      ropes++;
+      // 着地する床：ステージが進むと動く床や崩れる床になる
+      const Lb = Math.max(3.4, Math.min(8, rr(5, 8) - D * 0.3));
+      let B, nextPs;
+      const roll = rnd();
+      const nearCorner = (u0, u1) => corners.some(c => c > u0 - Ws / 2 - 1 && c < u1 + Ws / 2 + 1);
+      if (D >= 3 && roll < 0.22 + D * 0.03 && !nearCorner(found.gEnd - 2.7, found.gEnd + Lb + 2.7)) {
+        const amp = Math.min(2.6, 1.2 + D * 0.1);
+        const per = rr(3.2, 4.6);
+        B = mk(found.gEnd, found.gEnd + Lb, { kind: 'mover', col: 0x8ee3ff, mv: { ax: run.hx, az: run.hz, ay: 0, amp: amp, om: Math.PI * 2 / per, ph: rnd() * 6.28 } })[0];
+        nextPs = found.gEnd + Lb + amp - 0.3;          // 一番遠くまで動いたとき、次の床に少し重なる
+      } else if (D >= 5 && roll > 0.8 && !nearCorner(found.gEnd, found.gEnd + Lb + 2.4)) {
+        const n = Math.ceil(Lb / 2.4);
+        const made = [];
+        for (let k = 0; k < n; k++) made.push(mk(found.gEnd + k * 2.4 + 0.06, found.gEnd + (k + 1) * 2.4 - 0.06, { kind: 'crumble', col: 0xf2c48d, cr: { st: 0, t: 0 } })[0]);
+        B = made[0];
+        nextPs = found.gEnd + n * 2.4;
+      } else {
+        B = null; nextPs = found.gEnd;
+      }
+      const landU = found.gEnd + 1.6;
+      const fq = pt(found.r + found.L * Math.sin(found.need));
+      steps.push({ k: 'rope', x: fq.x, y: Ys, z: fq.z, rope: ri, platU: landU });
+      const lq = pt(landU);
+      steps.push({ k: 'pad', x: lq.x, y: Ys, z: lq.z, platU: landU, plat: B });
+      lastU = landU;
+      ps = nextPs; cur = Math.max(nextPs, found.gEnd) + Lb;
+      if (B) { cur = nextPs + 2; }
+      // 2本ごとにチェックポイント、3本ごとに途中の出口（道の端にスーパートランポリン）
+      if (ropes % 2 === 0) pendingCP = true;
+      if (ropes % 3 === 0 && Ws >= 8.6) route.wantMid = (route.wantMid || []).concat([ps + 1.5]);
+    }
+    // 最後の床（出口まで）
+    mk(ps, st.b + 3);
+    if (pendingCP) addCP(Math.min(st.b - 2, ps + 2));
+    // 着地先の床に、入れ替えで作った「着地の床」を対応づける
+    for (const s of steps) if ((s.k === 'pad' || s.k === 'rope') && !s.plat && s.platU !== undefined) s.plat = platAtU(s.platU);
+    // ---- 出口：真上のメインの床へ、スーパートランポリンで戻る ----
+    const addExit = (u, lat, final) => {
+      const q = pt(u, lat);
+      const P = subPlats.find(X => X.kind === 'plat' && Math.abs(q.x - X.x) <= X.w / 2 - 1.8 && Math.abs(q.z - X.z) <= X.d / 2 - 1.8) ||
+                (final ? null : platAtU(u));
+      if (!P || P.kind !== 'plat') return false;
+      const ab = above(q.x, q.z, 1.8).filter(Q => Q.y - Q.t > Ys + 5);
+      if (!ab.length) return false;
+      let Q = ab[0]; for (const X of ab) if (X.y < Q.y) Q = X;
+      const dh = Q.y - Ys;
+      C.pads.push({ plat: P, ox: q.x - P.x, oz: q.z - P.z, jv: padJV(dh), dh: dh, anim: 0, kind: 'mega', r: MEGA_R, sub: true });
+      if (final) { steps.push({ k: 'walk', x: q.x, y: Ys, z: q.z }); steps.push({ k: 'pad', x: q.x, y: Q.y, z: q.z, plat: Q }); route.exit = Q; }
+      return true;
+    };
+    for (const u of route.wantMid || []) addExit(u, (Ws / 2 - 2) * (rnd() < 0.5 ? 1 : -1), false);
+    walkTo(lastU, st.b - 0.5, Ys);
+    steps.pop();
+    if (!addExit(st.b, 0, true)) {
+      // 念のため：出口が置けなかったら、少し手前を試す
+      for (let k = 1; k < 12 && !route.exit && st.b - k > lastU + 2; k++) addExit(st.b - k, 0, true);
+      for (let k = 1; k < 4 && !route.exit; k++) addExit(st.b + k * 0.8, 0, true);
+    }
+    // 入口の目印：メインの床の端に、下向きの矢印
+    const eq = pt(st.a + 1.5);
+    const eab = above(eq.x, eq.z, 0.4);
+    if (eab.length) {
+      let Q = eab[0]; for (const X of eab) if (X.y > Q.y) Q = X;
+      const run = runAt(st.a + 1.5);
+      for (const sgn of [1, -1]) {
+        const half = (run.hx !== 0 ? Q.d : Q.w) / 2 - 1.4;
+        const sq = pt(st.a + 1.5, sgn * half);
+        C.signs.push({ x: sq.x, y: Q.y, z: sq.z, yaw: Math.atan2(-(-run.hz * sgn), -(run.hx * sgn)), sub: true, stretch: si });
+      }
+    }
+    route.entry = (() => { const q = pt(st.a + 2); return { x: q.x, y: Ys, z: q.z }; })();
+    route.seg = seg0;
+    route.stretch = si;
+    if (route.exit && steps.some(s => s.k === 'rope')) C.subRoutes.push(route);
+    else {
+      for (const r of C.ropes) if (r.sub && r.stretch === si) r.dead = true; /* ロープのない区間は作らない */ for (const P of subPlats) P.dead = true; for (let k = C.pads.length - 1; k >= 0; k--) if (C.pads[k].sub && subPlats.includes(C.pads[k].plat)) C.pads.splice(k, 1); for (let k = C.cps.length - 1; k >= 0; k--) if (C.cps[k].sub && subPlats.includes(C.cps[k].plat)) C.cps.splice(k, 1); }
+    colI++;
+  });
+
+  C.plats = C.plats.filter(P => !P.dead);
+  C.signs = C.signs.filter(s => !s.sub || C.subRoutes.some(r => r.stretch === s.stretch));
+  // ---- チェックポイントを進み具合の順に並べ直す ----
+  const progOf = (x, y, z) => {
+    let best = 0, bd = Infinity;
+    for (const q of C.prog) { const dd = (q.x - x) ** 2 + (q.z - z) ** 2 + 0.35 * (q.y - y) ** 2; if (dd < bd) { bd = dd; best = q.s; } }
+    return best;
+  };
+  C.cps.forEach((c, k) => { c.ps = k === 0 ? -1 : progOf(c.x, c.y, c.z) + (c.sub ? 0.01 : 0); });
+  C.cps.sort((a, b) => a.ps - b.ps);
+  for (const s of C.route) if (s.cpo) s.cp = C.cps.indexOf(s.cpo);
+  for (const sr of C.subRoutes) if (sr.cp) sr.cpIdx = C.cps.indexOf(sr.cp);
+  finishCourseShape(C, false);
 }
 
 // ---------- 床の位置（動く床は時間で決まる） ----------
@@ -982,9 +1305,91 @@ function inPadColumn(x, z) {
 }
 function pushOutOfPad() {}       // 屋外コースでは封鎖中も上に乗れる（跳ねないだけ）
 
+// ---------- ターザンロープ ----------
+function ropeTip(r, len) {
+  const l = len === undefined ? r.L : len, s = Math.sin(r.th), c = Math.cos(r.th);
+  return { x: r.ax + r.dx * s * l, y: r.ay - c * l, z: r.az + r.dz * s * l };
+}
+function ropeInit(r) {
+  const w = Math.sqrt(GRAVITY / r.L);
+  r.th = r.idleA * Math.sin(r.ph); r.om = r.idleA * w * Math.cos(r.ph);
+}
+// だれもつかまっていないロープは、決まった振れ幅でゆらゆら揺れ続ける
+function ropeIdle(r, dt) {
+  const h = dt / 4;
+  for (let s = 0; s < 4; s++) {
+    let a = -(GRAVITY / r.L) * Math.sin(r.th) - 0.03 * r.om;
+    const ca = Math.cos(r.th) - r.om * r.om * r.L / (2 * GRAVITY);
+    const amp = Math.acos(Math.max(-1, Math.min(1, ca)));
+    if (amp < r.idleA - 0.02) a += 0.9 * Math.sign(r.om || 1);
+    else if (amp > r.idleA + 0.05) a -= 0.8 * r.om;
+    r.om += a * h; r.th += r.om * h;
+  }
+}
+function tryGrabRope(p) {
+  if (!G.d.ropes || p.respawnT > 0 || p.stun > 0 || (RACE.on && ABIL.nopad > 0 && false)) return;
+  const hx = p.x, hy = p.y + ROPE_GRIP, hz = p.z;
+  for (let i = 0; i < G.d.ropes.length; i++) {
+    const r = G.d.ropes[i];
+    if (r.dead) continue;
+    // 同じロープは、一度着地するまでつかみ直さない。渡り終えた側（ロープより先）からもつかまない
+    if (p.ropeLast === i && (p.ropeCD > 0 || !p.landedSince || (p.x - r.ax) * r.dx + (p.z - r.az) * r.dz > 0)) continue;
+    const ux = r.dx * Math.sin(r.th), uy = -Math.cos(r.th), uz = r.dz * Math.sin(r.th);
+    const vx = hx - r.ax, vy = hy - r.ay, vz = hz - r.az;
+    let s = vx * ux + vy * uy + vz * uz;
+    s = Math.max(0, Math.min(r.L, s));
+    const d = Math.hypot(vx - ux * s, vy - uy * s, vz - uz * s);
+    if (s < Math.max(1.5, r.L - 3) || d > ROPE_GRAB_R) continue;      // つかめるのはロープの下のほう（先の玉から3mまで）
+    // つかむ：今の速さを振り子の勢いに変える
+    const Lg = Math.max(2.5, Math.min(r.L, s));
+    const tvx = r.dx * Math.cos(r.th), tvz = r.dz * Math.cos(r.th), tvy = Math.sin(r.th);
+    const v = (p.lvx || 0) * tvx + (p.lvz || 0) * tvz + (p.onGround ? 0 : p.vy) * tvy;
+    r.om = Math.max(-3.2, Math.min(3.2, v / Lg * 0.85 + r.om * 0.3));
+    p.rope = r; p.ropeIdx = i; p.ropeLen = Lg;
+    p.onGround = false; p.on = null; p.vy = 0; p.kx = p.kz = 0; p.fling = false; p.boost = false;
+    p.f = i + 1;
+    playGrab();
+    if ((G.ropeHints = (G.ropeHints || 0) + 1) <= 3) showToast(document.body.classList.contains('touch') ? 'はなすボタンで手をはなす' : 'SPACE で手をはなす');
+    return;
+  }
+}
+function releaseRope(boost) {
+  const p = G.player;
+  if (!p || !p.rope) return;
+  const r = p.rope, vt = r.om * p.ropeLen;
+  p.kx = r.dx * Math.cos(r.th) * vt;
+  p.kz = r.dz * Math.cos(r.th) * vt;
+  p.vy = Math.sin(r.th) * vt + (boost === false ? 0 : 2.5);
+  p.fling = true;
+  p.ropeLast = p.ropeIdx; p.ropeCD = ROPE_REGRAB; p.landedSince = false;
+  p.rope = null; p.ropeIdx = -1; p.f = 0;
+  playRelease();
+}
+function updateHanging(p, dt, mf, ms) {
+  const r = p.rope;
+  // 入力のうち、ロープが振れる向きの成分で振りを大きくする（前へ押すと前へ、後ろへ引くと後ろへ）
+  const sy = Math.sin(p.yaw), cy = Math.cos(p.yaw);
+  const wx = -sy * mf + cy * ms, wz = -cy * mf - sy * ms;
+  let u = wx * r.dx + wz * r.dz;
+  if (Math.abs(r.th) > ROPE_MAXA && Math.sign(u) === Math.sign(r.th)) u = 0;
+  const L = p.ropeLen, h = dt / 4;
+  for (let s = 0; s < 4; s++) {
+    const a = -(GRAVITY / L) * Math.sin(r.th) - 0.06 * r.om + ROPE_PUMP * u * (4.5 / Math.max(4.5, L)) ** 0.3;
+    r.om += a * h; r.th += r.om * h;
+  }
+  if (r.th > 1.45) { r.th = 1.45; r.om = Math.min(r.om, 0); }
+  if (r.th < -1.45) { r.th = -1.45; r.om = Math.max(r.om, 0); }
+  const t = ropeTip(r, L);
+  // 横方向のずれは少しずつ吸収する
+  p.x = t.x; p.z = t.z; p.y = t.y - ROPE_GRIP;
+  p.vy = 0; p.onGround = false; p.on = null;
+}
+
 // ---------- プレイヤー ----------
 function updatePlayer(dt) {
   const p = G.player;
+  const ox = p.x, oz = p.z;
+  if (p.ropeCD > 0) p.ropeCD -= dt;
 
   // 動く床に乗っていれば一緒に運ばれる
   if (p.onGround && p.on && p.on.kind === 'mover') {
@@ -1001,6 +1406,13 @@ function updatePlayer(dt) {
   const len = Math.hypot(mf, ms);
   if (len > 1) { mf /= len; ms /= len; }
   const moving = len > 0.06;
+  if (p.rope) {
+    updateHanging(p, dt, mf, ms);
+    if (p.stun > 0) releaseRope(false);
+    finishPlayerTimers(p, dt);
+    p.lvx = (p.x - ox) / Math.max(dt, 1e-4); p.lvz = (p.z - oz) / Math.max(dt, 1e-4);
+    return;
+  }
 
   const sy = Math.sin(p.yaw), cy = Math.cos(p.yaw);
   const dirX = -sy * mf + cy * ms;
@@ -1023,7 +1435,8 @@ function updatePlayer(dt) {
       const yPrev = p.y, yNext = p.y + p.vy * h;
       const L = p.vy < 0 ? landingAt(p.x, p.z, yPrev, yNext) : null;
       if (L) {
-        p.impact = -p.vy;
+        p.impact = -p.vy; p.fling = false; p.landedSince = true;
+        if (!!L.sub !== !!p.onSub) { p.onSub = !!L.sub; if (p.onSub) showToast('SUB ROUTE'); }
         p.y = L.cy; p.vy = 0; p.onGround = true; p.on = L; p.lastOn = L;
         G.shake = Math.min(0.9, G.shake + 0.12 + Math.max(0, p.impact - 25) * 0.012);
         playLand();
@@ -1065,22 +1478,13 @@ function updatePlayer(dt) {
     }
   }
   rotorHits(p, dt);
+  if (FEATURE_ROPE && !p.rope) tryGrabRope(p);
+  p.lvx = (p.x - ox) / Math.max(dt, 1e-4); p.lvz = (p.z - oz) / Math.max(dt, 1e-4);
 
   if (moving && p.onGround) p.walkPhase += dt * 9.5; else p.walkPhase *= 0.9;
   G.bob = (p.onGround && moving) ? Math.sin(p.walkPhase) * 0.055 : G.bob * 0.9;
 
-  if (p.dash > 0) { p.dash -= dt; if (p.dash < 0) p.dash = 0; }
-  if (p.wave > 0) { p.wave -= dt; if (p.wave < 0) p.wave = 0; }
-  // 空中では吹き飛びの勢いがあまり落ちない（発射台・波動で遠くまで飛ぶ）
-  const kf = Math.exp(-KNOCK_DECAY * dt);
-  p.kx *= kf; p.kz *= kf;
-  if (Math.abs(p.kx) < 0.02) p.kx = 0;
-  if (Math.abs(p.kz) < 0.02) p.kz = 0;
-  if (p.stun > 0) { p.stun -= dt; if (p.stun <= 0) { p.stun = 0; p.inv = RACE_INV; } }
-  if (p.inv > 0) { p.inv -= dt; if (p.inv < 0) p.inv = 0; }
-  if (p.respawnT > 0) p.respawnT -= dt;
-  if (G.fovKick > 0) { G.fovKick -= dt * 1.6; if (G.fovKick < 0) G.fovKick = 0; }
-  if (G.shake > 0) { G.shake -= dt * 2.2; if (G.shake < 0) G.shake = 0; }
+  finishPlayerTimers(p, dt);
 
   // チェックポイントの通過
   if (p.onGround) {
@@ -1093,11 +1497,27 @@ function updatePlayer(dt) {
   if (!p.onGround && (p.y < Math.min(cpc.y - 18, cpc.fallY) || p.y < G.d.minY - 14)) respawnPlayer();
 }
 
+function finishPlayerTimers(p, dt) {
+  if (p.dash > 0) { p.dash -= dt; if (p.dash < 0) p.dash = 0; }
+  if (p.wave > 0) { p.wave -= dt; if (p.wave < 0) p.wave = 0; }
+  // 空中では吹き飛びの勢いがあまり落ちない（発射台・波動で遠くまで飛ぶ）
+  const kf = Math.exp(-(p.fling && !p.onGround ? 0.25 : KNOCK_DECAY) * dt);
+  p.kx *= kf; p.kz *= kf;
+  if (Math.abs(p.kx) < 0.02) p.kx = 0;
+  if (Math.abs(p.kz) < 0.02) p.kz = 0;
+  if (p.stun > 0) { p.stun -= dt; if (p.stun <= 0) { p.stun = 0; p.inv = RACE_INV; } }
+  if (p.inv > 0) { p.inv -= dt; if (p.inv < 0) p.inv = 0; }
+  if (p.respawnT > 0) p.respawnT -= dt;
+  if (G.fovKick > 0) { G.fovKick -= dt * 1.6; if (G.fovKick < 0) G.fovKick = 0; }
+  if (G.shake > 0) { G.shake -= dt * 2.2; if (G.shake < 0) G.shake = 0; }
+}
+
 function respawnPlayer() {
   const p = G.player, c = G.d.cps[p.cp];
   const a = Math.random() * Math.PI * 2, r = Math.random() * 1.2;
   p.x = c.x + Math.cos(a) * r; p.z = c.z + Math.sin(a) * r; p.y = c.y + 0.02;
   p.vy = 0; p.kx = 0; p.kz = 0; p.onGround = true; p.on = c.plat; p.boost = false;
+  p.rope = null; p.ropeIdx = -1; p.f = 0; p.fling = false; p.ropeCD = 0; p.landedSince = true;
   p.yaw = c.yaw; p.respawnT = 0.7;
   flash('rgba(120,200,255,.45)');
   playFall();
@@ -1194,7 +1614,7 @@ function courseProgress(x, y, z) {
   const pr = G.d.prog;
   let best = 0, bd = Infinity;
   for (const q of pr) {
-    const dd = (q.x - x) * (q.x - x) + (q.z - z) * (q.z - z) + 2.2 * (q.y - y) * (q.y - y);
+    const dd = (q.x - x) * (q.x - x) + (q.z - z) * (q.z - z) + (FEATURE_SUB ? 0.35 : 2.2) * (q.y - y) * (q.y - y);   // サブルートは真下なので高さの差は軽く見る
     if (dd < bd) { bd = dd; best = q.s; }
   }
   return best;
@@ -1248,6 +1668,22 @@ function makeGroundTexture() {
   g.fillStyle = 'rgba(255,255,255,.25)';
   for (let k = 0; k < 40; k++) { g.beginPath(); g.arc((k * 73) % 256, (k * 151) % 256, 3, 0, Math.PI * 2); g.fill(); }
   return finishTex(c, true);
+}
+function makeUnderTexture() {
+  const [c, g] = texCanvas(128, 128);
+  g.fillStyle = '#d9dcea'; g.fillRect(0, 0, 128, 128);
+  g.strokeStyle = '#b3b8cf'; g.lineWidth = 4;
+  g.strokeRect(2, 2, 124, 124); g.beginPath(); g.moveTo(64, 0); g.lineTo(64, 128); g.moveTo(0, 64); g.lineTo(128, 64); g.stroke();
+  g.fillStyle = '#9aa0bb';
+  for (const [x, y] of [[12, 12], [116, 12], [12, 116], [116, 116], [52, 52], [76, 76], [52, 76], [76, 52]]) { g.beginPath(); g.arc(x, y, 4, 0, Math.PI * 2); g.fill(); }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 4; return t;
+}
+function makeRopeTexture() {
+  const [c, g] = texCanvas(32, 64);
+  g.fillStyle = '#e8b86a'; g.fillRect(0, 0, 32, 64);
+  g.strokeStyle = '#a8742e'; g.lineWidth = 5;
+  for (let y = -32; y < 96; y += 16) { g.beginPath(); g.moveTo(0, y); g.lineTo(32, y + 16); g.stroke(); }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
 }
 function makeFlagTexture(col) {
   const [c, g] = texCanvas(128, 80);
@@ -1310,6 +1746,9 @@ const CM = {
   biscuit: new THREE.MeshStandardMaterial({ map: makeBiscuitTexture(), roughness: 0.9, metalness: 0 }),
   mover:   new THREE.MeshStandardMaterial({ color: 0x8ee3ff, roughness: 0.4, metalness: 0.05, emissive: 0x2a6f88, emissiveIntensity: 0.25 }),
   arm:     new THREE.MeshStandardMaterial({ map: CANDY_TEX, roughness: 0.4, metalness: 0 }),
+  rope:    new THREE.MeshStandardMaterial({ map: makeRopeTexture(), roughness: 0.85, metalness: 0 }),
+  under:   new THREE.MeshStandardMaterial({ map: makeUnderTexture(), roughness: 0.6, metalness: 0.1, emissive: 0x8a8fa8, emissiveIntensity: 0.45, vertexColors: true }),
+  underBox: new THREE.MeshStandardMaterial({ color: 0xd9dcea, roughness: 0.6, metalness: 0.1, emissive: 0x8a8fa8, emissiveIntensity: 0.45 }),
   knob:    new THREE.MeshStandardMaterial({ color: 0xff3d4a, roughness: 0.3, metalness: 0.1 }),
   flagOff: new THREE.MeshBasicMaterial({ map: makeFlagTexture('#9aa3ad'), side: THREE.DoubleSide }),
   flagOn:  new THREE.MeshBasicMaterial({ map: makeFlagTexture('#2fd06a'), side: THREE.DoubleSide }),
@@ -1342,7 +1781,7 @@ Builder.prototype.mesh = function (mat) {
   const m = new THREE.Mesh(g, mat);
   return m;
 };
-function addBox(top, side, x, yTop, z, w, t, d, col) {
+function addBox(top, side, x, yTop, z, w, t, d, col, bottom) {
   const x0 = x - w / 2, x1 = x + w / 2, z0 = z - d / 2, z1 = z + d / 2, y0 = yTop - t, y1 = yTop;
   const u = (v) => v / TILE_M;
   top.quad([x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0, 1, 0],
@@ -1353,12 +1792,15 @@ function addBox(top, side, x, yTop, z, w, t, d, col) {
   side.quad([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1], [[u(x1), 0], [u(x0), 0], [u(x0), 1], [u(x1), 1]], sideCol);
   side.quad([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [1, 0, 0], [[u(z1), 0], [u(z0), 0], [u(z0), 1], [u(z1), 1]], sideCol);
   side.quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0], [[u(z0), 0], [u(z1), 0], [u(z1), 1], [u(z0), 1]], sideCol);
-  side.quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0], [[0, 0], [1, 0], [1, 0.2], [0, 0.2]], sideCol);
+  // 床の裏（サブルートから見上げる面）は明るい金属のパネル
+  (bottom || side).quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0],
+    bottom ? [[u(x0) * 1.6, u(z0) * 1.6], [u(x1) * 1.6, u(z0) * 1.6], [u(x1) * 1.6, u(z1) * 1.6], [u(x0) * 1.6, u(z1) * 1.6]] : [[0, 0], [1, 0], [1, 0.2], [0, 0.2]],
+    bottom ? 0xffffff : sideCol);
   void sv;
 }
 function boxMesh(P, mat, topMat) {
   const g = new THREE.BoxGeometry(P.w, P.t, P.d);
-  const mats = topMat ? [mat, mat, topMat, mat, mat, mat] : mat;
+  const mats = FEATURE_SUB ? [mat, mat, topMat || mat, CM.underBox, mat, mat] : (topMat ? [mat, mat, topMat, mat, mat, mat] : mat);
   const m = new THREE.Mesh(g, mats);
   m.position.set(P.cx, P.cy - P.t / 2, P.cz);
   return m;
@@ -1383,12 +1825,12 @@ function buildStage(si, seed) {
   scene.add(grp);
 
   // ---- 動かない床はまとめて描く ----
-  const top = new Builder(), side = new Builder();
+  const top = new Builder(), side = new Builder(), under = new Builder();
   const poles = [];
   G.belts = [];
   for (const P of d.plats) {
     if (P.kind === 'plat') {
-      addBox(top, side, P.x, P.y, P.z, P.w, P.t, P.d, P.col);
+      addBox(top, side, P.x, P.y, P.z, P.w, P.t, P.d, P.col, FEATURE_SUB ? under : null);
       poles.push(P);
     } else if (P.kind === 'conv') {
       const tex = BELT_TEX.clone(); tex.needsUpdate = true;
@@ -1413,7 +1855,7 @@ function buildStage(si, seed) {
     }
   }
   const topMesh = top.mesh(CM.top), sideMesh = side.mesh(CM.side);
-  grp.add(topMesh, sideMesh);
+  grp.add(topMesh, sideMesh, under.mesh(CM.under));
 
   // ---- 床の下の支柱（見た目だけ。高さの感覚をつかみやすくする） ----
   const gy = d.groundY;
@@ -1429,7 +1871,8 @@ function buildStage(si, seed) {
       let blocked = false;
       for (const Q of d.plats) {
         if (Q === P || Q.y >= P.y - 0.5) continue;
-        const qx = Q.w / 2 + (Q.mv && Q.mv.ax ? Q.mv.amp : 0) + 0.6, qz = Q.d / 2 + (Q.mv && Q.mv.az ? Q.mv.amp : 0) + 0.6;
+        const mg = Q.sub ? 3.5 : 0.6;     // サブルートのすぐ横を通る柱も立てない
+        const qx = Q.w / 2 + (Q.mv && Q.mv.ax ? Q.mv.amp : 0) + mg, qz = Q.d / 2 + (Q.mv && Q.mv.az ? Q.mv.amp : 0) + mg;
         if (Math.abs(x - Q.x) < qx && Math.abs(z - Q.z) < qz) { blocked = true; break; }
       }
       if (blocked) continue;
@@ -1529,6 +1972,34 @@ function buildStage(si, seed) {
   }
   CM.arrow.map.repeat.set(1, 1);
 
+  // ---- ターザンロープ ----
+  const ropeGeo = new THREE.CylinderGeometry(0.075, 0.075, 1, 8, 1, true).translate(0, -0.5, 0);
+  const barGeo = new THREE.CylinderGeometry(0.22, 0.22, 2.6, 14).rotateZ(Math.PI / 2);
+  for (const r of d.ropes) {
+    if (r.dead) continue;
+    ropeInit(r);
+    const bar = new THREE.Group();
+    if (r.mount) {
+      // メインの床の裏に取り付けた金具
+      const plate = new THREE.Mesh(GEO.unit, CM.knob); plate.scale.set(0.9, 0.18, 0.9); plate.position.y = -0.09; bar.add(plate);
+      const ring = new THREE.Mesh(GEO.sphere, CM.arm); ring.scale.setScalar(0.22); ring.position.y = -0.25; bar.add(ring);
+    } else {
+      const b = new THREE.Mesh(barGeo, CM.arm); bar.add(b);
+      for (const s of [-1, 1]) { const k = new THREE.Mesh(GEO.sphere, CM.knob); k.scale.setScalar(0.38); k.position.x = s * 1.35; bar.add(k); }
+    }
+    bar.position.set(r.ax, r.ay + (r.mount ? 0 : 0.1), r.az);
+    bar.rotation.y = Math.atan2(-r.dx, -r.dz);       // 棒はロープの振れる向きと直角
+    grp.add(bar);
+    const m = new THREE.Mesh(ropeGeo, CM.rope.clone());
+    m.material.map = CM.rope.map.clone(); m.material.map.needsUpdate = true;
+    m.material.map.repeat.set(1, r.L / 0.6);
+    m.position.set(r.ax, r.ay, r.az);
+    grp.add(m);
+    const knot = new THREE.Mesh(GEO.sphere, CM.knob); knot.scale.setScalar(0.2);
+    grp.add(knot);
+    r.mesh = m; r.knot = knot;
+  }
+
   // ---- 回転バー ----
   for (const R of d.rotors) {
     const c = rotorCenter(R);
@@ -1612,10 +2083,46 @@ function buildStage(si, seed) {
     x: d.start.x + sp.x, y: 0, z: d.start.z + sp.z,
     vy: 0, yaw: d.start.yaw, pitch: -0.08,
     onGround: true, on: d.plats[0], f: 0, power: 0, dash: 0, stun: 0, inv: 0, fin: false, walkPhase: 0,
-    kx: 0, kz: 0, wave: 0, cp: 0, respawnT: 0, boost: false
+    kx: 0, kz: 0, wave: 0, cp: 0, respawnT: 0, boost: false,
+    rope: null, ropeIdx: -1, ropeCD: 0, ropeLast: -1, fling: false, lvx: 0, lvz: 0
   };
   syncCamera(0);
   updateHUD();
+}
+
+// ---------- ロープの揺れと見た目 ----------
+const _ropeQ = new THREE.Quaternion(), _ropeV = new THREE.Vector3(), _ropeDown = new THREE.Vector3(0, -1, 0);
+function updateRopes(dt) {
+  const d = G.d, p = G.player;
+  if (!d.ropes) return;
+  const held = new Map();                 // ほかのプレイヤーがつかんでいるロープ → その人の手の位置
+  if (RACE.on) for (const q of NET.players) {
+    if (!q || q.slot === NET.slot || !q.init || q.out || !q.obj || !(q.f > 0)) continue;
+    held.set(q.f - 1, { x: q.x, y: q.y + ROPE_GRIP, z: q.z });
+  }
+  d.ropes.forEach((r, i) => {
+    const mine = p && p.rope === r;
+    if (!mine) ropeIdle(r, dt);
+    let ux, uy, uz, len = r.L;
+    const h = mine ? null : held.get(i);
+    if (h) {
+      // 見た目だけ、つかんでいる人の手までロープを伸ばす
+      ux = h.x - r.ax; uy = h.y - r.ay; uz = h.z - r.az;
+      const l = Math.hypot(ux, uy, uz) || 1; ux /= l; uy /= l; uz /= l;
+      len = l;
+    } else {
+      ux = r.dx * Math.sin(r.th); uy = -Math.cos(r.th); uz = r.dz * Math.sin(r.th);
+    }
+    if (r.mesh) {
+      _ropeV.set(ux, uy, uz);
+      _ropeQ.setFromUnitVectors(_ropeDown, _ropeV);
+      r.mesh.quaternion.copy(_ropeQ);
+      r.mesh.scale.set(1, len, 1);
+      const kl = mine ? p.ropeLen + 0.05 : h ? len + 0.05 : len;
+      r.mesh.scale.set(1, kl, 1);
+      r.knot.position.set(r.ax + ux * kl, r.ay + uy * kl, r.az + uz * kl);
+    }
+  });
 }
 
 // ---------- 毎フレームのコース演出 ----------
@@ -1638,6 +2145,7 @@ function updateCourse(dt) {
   const t = courseTime();
   updateMovers(t);
   updateCrumbles(dt);
+  updateRopes(dt);
   for (const R of d.rotors) {
     const c = rotorCenter(R);
     if (R.arms3) { R.arms3.rotation.y = -rotorAngle(R, t); R.arms3.parent.position.set(c.x, c.y, c.z); }
@@ -1680,6 +2188,8 @@ function updateCourse(dt) {
 // ---------- 効果音（コース用） ----------
 function playLaunch()     { tone('sawtooth', 180, 1200, 0.35, 0.12); tone('sine', 300, 1600, 0.4, 0.12); }
 function playCheckpoint() { [784, 1047, 1319].forEach((f, i) => setTimeout(() => tone('triangle', f, f, 0.14, 0.15), i * 80)); }
+function playGrab()       { tone('triangle', 520, 780, 0.12, 0.12); }
+function playRelease()    { tone('sine', 700, 1100, 0.18, 0.10); }
 function playMega()       { tone('triangle', 260, 1500, 0.7, 0.16); setTimeout(() => tone('sine', 520, 2400, 0.5, 0.10), 90); }
 function playBounce()     { tone('sine', 200, 900, 0.35, 0.16); tone('triangle', 400, 1300, 0.3, 0.10); }
 function playFall()       { tone('sine', 900, 200, 0.45, 0.14); }
@@ -1742,6 +2252,7 @@ function waveHitEnemies() {}       // 追跡者はいない
 function applyBlast(dx, dz, k) {
   const p = G.player;
   if (!p) return;
+  if (p.rope) releaseRope(false);       // 波動を受けるとロープから手がはなれる
   p.kx += dx * WAVE_KNOCK * k;
   p.kz += dz * WAVE_KNOCK * k;
   p.vy = Math.max(p.vy, WAVE_LIFT * k);
@@ -1939,6 +2450,7 @@ function updateHUDLive() {
     dashFillEl.style.width = Math.max(0, Math.min(1, p.dash / DASH_DUR)) * 100 + '%';
   }
   updateWaveUi();
+  document.body.classList.toggle('hanging', !!p.rope);
   if (RACE.on) raceHud();
 }
 
@@ -2165,6 +2677,7 @@ window.addEventListener('keydown', e => {
   if (e.target && e.target.tagName === 'INPUT') return;   // 入力欄では素通し
   if (e.key === 'm' || e.key === 'M') { toggleMute(); return; }
   if (e.key === 'v' || e.key === 'V') { toggleView(); return; }
+  if (FEATURE_ROPE && e.key === ' ' && G.player && G.player.rope) { releaseRope(); e.preventDefault(); return; }
   if ((e.key === 'r' || e.key === 'R') && G.active && G.player && !(SPEC.on && RACE.on) && !G.player.fin && G.player.respawnT <= 0) { respawnPlayer(); return; }
   if (SPEC.on && RACE.on) {
     if (e.key === 'a' || e.key === 'A' || e.key === 'ArrowLeft')  { specPick(-1); e.preventDefault(); return; }
@@ -2293,6 +2806,7 @@ touchLayer.addEventListener('touchstart', ev => {
     const t = ev.changedTouches[n];
     const q = localPos(t);
     if (t.target && t.target.id === 'waveBtn') { fireWave(); continue; }
+    if (t.target && t.target.id === 'ropeBtn') { releaseRope(); continue; }
     if (t.target && t.target.id === 'viewBtn') { toggleView(); continue; }
     if (q.x < r.width * 0.5 && stick.id === null) {
       stick.id = t.identifier; stick.active = true; stick.x = 0; stick.y = 0;
@@ -2897,7 +3411,9 @@ function updateRemotes(dt) {
     const chr = q.obj.userData.chr;
     if (chr) {
       q.obj.rotation.y = 0;                        // 向きはキャラ側で決める（親の回転と二重にしない）
-      charDrive(chr, dt, q.x, q.y, q.z, q.yaw, (q.st & 4) !== 0, stunned);
+      const hr = (q.f > 0 && G.d && G.d.ropes) ? G.d.ropes[q.f - 1] : null;
+      const htilt = hr ? Math.atan2((q.x - hr.ax) * hr.dx + (q.z - hr.az) * hr.dz, hr.ay - (q.y + ROPE_GRIP)) : 0;
+      charDrive(chr, dt, q.x, q.y, q.z, q.yaw, (q.st & 4) !== 0, stunned, hr ? Math.atan2(-hr.dx, -hr.dz) : undefined, htilt);
     } else q.obj.rotation.y = q.yaw;
     if (q.userDataBlink === undefined) q.userDataBlink = 0;
     q.userDataBlink += dt;
@@ -3417,11 +3933,11 @@ document.getElementById('btnNextRace').onclick = () => {
 })();
 
 // ===================== 3Dキャラクター =====================
-// 体: Mixamo のキャラクター4体（スキンのみ使用）
+// 体: Mixamo のキャラクター6体（スキンのみ使用）
 // 動き: Quaternius "Universal Animation Library" (CC0) の7本を、各キャラの骨へ移し替えたもの（assets/characters/）
-const SKIN_NAMES = ['キャップ', 'ミント', 'ネズミ', 'マフラー'];
-const SKIN_FILES = ['assets/characters/cap.glb', 'assets/characters/mint.glb', 'assets/characters/mouse.glb', 'assets/characters/muffler.glb'];
-const SKIN_THUMBS = ['assets/characters/cap.jpg', 'assets/characters/mint.jpg', 'assets/characters/mouse.jpg', 'assets/characters/muffler.jpg'];
+const SKIN_NAMES = ['キャップ', 'ミント', 'ネズミ', 'マフラー', 'グランマ', 'ハット'];
+const SKIN_FILES = ['assets/characters/cap.glb', 'assets/characters/mint.glb', 'assets/characters/mouse.glb', 'assets/characters/muffler.glb', 'assets/characters/granny.glb', 'assets/characters/hat.glb'];
+const SKIN_THUMBS = ['assets/characters/cap.jpg', 'assets/characters/mint.jpg', 'assets/characters/mouse.jpg', 'assets/characters/muffler.jpg', 'assets/characters/granny.jpg', 'assets/characters/hat.jpg'];
 const SKINS = [];                 // 読み込んだキャラ { scene, clips, srcH, ready }
 const CHAR = { ready: false, failed: false };   // 1体目が読めたら ready
 const CHAR_H = 1.75;              // ゲーム内での身長（目線 EYE=1.62 に合わせる）
@@ -3580,7 +4096,10 @@ function makeCharacter(col, skin) {
   model.rotation.y = Math.PI;                      // glTFの正面(+Z)をゲームの正面(-Z)へ
 
   const root = new THREE.Group();
-  root.add(model);
+  // ロープにぶら下がったとき、手の位置を中心に体を傾けるための入れ子
+  const pivot = new THREE.Group(), holder = new THREE.Group();
+  pivot.position.y = ROPE_GRIP; holder.position.y = -ROPE_GRIP;
+  root.add(pivot); pivot.add(holder); holder.add(model);
 
   const mixer = new THREE.AnimationMixer(model);
   const act = {};
@@ -3592,8 +4111,21 @@ function makeCharacter(col, skin) {
     }
     act[name] = a;
   }
+  // ロープにぶら下がる腕のポーズ用に、腕の骨を探しておく
+  const arms = [];
+  for (const side of ['Left', 'Right']) {
+    let A = null, F = null, H = null;
+    model.traverse(o => {
+      if (!o.isBone) return;
+      if (new RegExp(side + 'Arm$').test(o.name)) A = o;
+      else if (new RegExp(side + 'ForeArm$').test(o.name)) F = o;
+      else if (new RegExp(side + 'Hand$').test(o.name)) H = o;
+    });
+    if (A && F && H) arms.push({ A: A, F: F, H: H, side: side === 'Left' ? 1 : -1 });
+  }
   const c = {
     root: root, mixer: mixer, act: act, cur: '', col: -1, skin: SKINS.indexOf(sk), mats: mats,
+    arms: arms, hangW: 0, model: model, pivot: pivot,
     px: null, py: 0, pz: 0, vx: 0, vz: 0,
     face: 0, air: false, fell: false, airT: 0, landT: 0, castT: 0
   };
@@ -3681,7 +4213,7 @@ function angLerp(a, b, k) {
 }
 
 // 位置・接地・ダッシュの状態からアニメーションを選んで進める
-function charDrive(c, dt, x, y, z, yaw, onGround, stunned) {
+function charDrive(c, dt, x, y, z, yaw, onGround, stunned, hangYaw, hangTilt) {
   // 速度は位置の変化から求める（自分も他プレイヤーも同じ扱いにできる）
   if (c.px === null) { c.px = x; c.py = y; c.pz = z; c.face = yaw; }
   const dx = x - c.px, dy = y - c.py, dz = z - c.pz;
@@ -3698,10 +4230,18 @@ function charDrive(c, dt, x, y, z, yaw, onGround, stunned) {
   // 体の向き：走っているときは進行方向、止まっているときと撃つときは視線の向き
   let want = yaw;
   if (c.castT <= 0 && !stunned && spd > 1.2) want = Math.atan2(-c.vx, -c.vz);
+  if (hangYaw !== undefined) want = hangYaw;       // ぶら下がり中は、ロープの振れる向きを向く
   c.face = angLerp(c.face, want, Math.min(1, dt * 12));
   c.root.rotation.y = c.face;
 
-  if (!onGround) {
+  const hanging = hangYaw !== undefined;
+  c.hangW += ((hanging ? 1 : 0) - c.hangW) * Math.min(1, dt * 10);
+  c.tilt = (c.tilt || 0) + (((hanging ? (hangTilt || 0) * 0.85 : 0)) - (c.tilt || 0)) * Math.min(1, dt * 14);
+  c.pivot.rotation.x = c.tilt;
+  if (hanging) {
+    c.air = true; c.fell = false; c.airT = 0;
+    charPlay(c, 'Jump_Loop', 0.15);
+  } else if (!onGround) {
     if (!c.air) {
       c.air = true; c.airT = 0; c.fell = false;
       // 上へ弾かれた＝トランポリン。落ちただけなら空中ポーズへ
@@ -3742,6 +4282,37 @@ function charDrive(c, dt, x, y, z, yaw, onGround, stunned) {
     if (c.castT <= 0) c.act.Cast_Upper.fadeOut(0.18);
   }
   c.mixer.update(dt);
+  if (c.hangW > 0.02) armsUp(c, c.hangW);
+}
+
+// 両腕を頭の上へ伸ばして、ロープを握る形にする（アニメーションの上から骨を回す）
+const _aw = new THREE.Vector3(), _bw = new THREE.Vector3(), _cw = new THREE.Vector3(), _dw = new THREE.Vector3();
+const _qa = new THREE.Quaternion(), _qb = new THREE.Quaternion(), _qp = new THREE.Quaternion(), _qd = new THREE.Quaternion();
+function aimBone(bone, child, dir, w) {
+  bone.getWorldPosition(_aw); child.getWorldPosition(_bw);
+  _cw.subVectors(_bw, _aw).normalize();
+  _qd.setFromUnitVectors(_cw, dir);
+  bone.getWorldQuaternion(_qa);
+  _qb.copy(_qd).multiply(_qa);                     // 向けたあとの世界での回転
+  bone.parent.getWorldQuaternion(_qp).invert();
+  _qb.premultiply(_qp);                            // 親から見た回転へ
+  bone.quaternion.slerp(_qb, w);
+  bone.updateMatrixWorld(true);
+}
+function armsUp(c, w) {
+  if (!c.arms.length) return;
+  c.root.updateMatrixWorld(true);
+  const f = c.face, fx = -Math.sin(f), fz = -Math.cos(f);
+  const L = c.arms.find(a => a.side === 1), R = c.arms.find(a => a.side === -1);
+  if (!L || !R) return;
+  L.A.getWorldPosition(_aw); R.A.getWorldPosition(_bw);
+  const sx = _bw.x - _aw.x, sz = _bw.z - _aw.z, sl = Math.hypot(sx, sz) || 1;   // 左肩→右肩
+  for (const a of c.arms) {
+    const k = a.side === 1 ? 1 : -1;                // 内側へ寄せて、両手が頭の上で合うように
+    _dw.set(sx / sl * 0.28 * k + fx * 0.12, 1, sz / sl * 0.28 * k + fz * 0.12).normalize();
+    aimBone(a.A, a.F, _dw, w);
+    aimBone(a.F, a.H, _dw, w);
+  }
 }
 
 // ---------- 自分のキャラ（三人称視点のときだけ表示） ----------
@@ -3762,7 +4333,7 @@ function updateSelfChr(dt) {
   if (!show) { selfChr.root.visible = false; selfChr.px = null; return; }
   charColors(selfChr, RACE.on ? PCOLORS[NET.slot] : 0x00ffcc);
   selfChr.root.position.set(p.x, p.y, p.z);
-  charDrive(selfChr, dt, p.x, p.y, p.z, p.yaw, p.onGround, p.stun > 0);
+  charDrive(selfChr, dt, p.x, p.y, p.z, p.yaw, p.onGround, p.stun > 0, p.rope ? Math.atan2(-p.rope.dx, -p.rope.dz) : undefined, p.rope ? p.rope.th : 0);
   // カメラが体にめり込む近さでは隠す。しびれている間は点滅
   const blink = p.stun > 0 && (Math.floor(performance.now() / 125) % 2 === 1);
   selfChr.root.visible = VIEW.cur > 0.9 && !blink;
