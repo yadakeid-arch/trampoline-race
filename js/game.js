@@ -3028,7 +3028,7 @@ const ABIL = {
   zap: 0, nopad: 0, dark: 0,          // 自分が受けている効果の残り秒数
   superPad: 0                         // 自分のトランポリンがスーパーになっている残り秒数
 };
-function abilReset() { ABIL.spin = 0; ABIL.winner = -1; ABIL.zap = 0; ABIL.nopad = 0; ABIL.dark = 0; ABIL.superPad = 0; applyDarkness(); }
+function abilReset() { ABIL.spin = 0; ABIL.winner = -1; ABIL.zap = 0; ABIL.nopad = 0; ABIL.dark = 0; ABIL.superPad = 0; applyDarkness(); rouletteHide(); }
 
 const r2 = (v) => Math.round(v * 100) / 100;
 const r1 = (v) => Math.round(v * 10) / 10;
@@ -3699,6 +3699,8 @@ function applyItem(i, slot, kind) {
   if (pu) gemTaken(pu);
   if (i === -1 && slot === NET.slot) removeHelpGem();
   if (slot === NET.slot && !SPEC.on) { G.player.dash = DASH_DUR; playPower(); }
+  // 前のルーレットが回っている途中なら、その能力をすぐ発動してから次を回す（取りこぼさない）
+  if (ABIL.spin > 0) { ABIL.spin = 0; abilFire(ABIL.spinKind, ABIL.winner); }
   ABIL.spin = ROULETTE_SPIN;
   ABIL.winner = slot;
   ABIL.spinKind = kind;
@@ -3794,10 +3796,17 @@ const rouEl = document.getElementById('roulette');
 const rouIcon = document.getElementById('rouIcon');
 const rouName = document.getElementById('rouName');
 const rouWho = document.getElementById('rouWho');
-let rouFrame = 0;
+let rouFrame = 0, rouTimer = 0, rouSafe = 0;
+function rouletteHide() {
+  clearTimeout(rouTimer); clearTimeout(rouSafe);
+  if (rouEl) rouEl.classList.remove('on', 'done');
+}
 function rouletteShow() {
   if (!rouEl) return;
   rouFrame = 0;
+  clearTimeout(rouTimer); clearTimeout(rouSafe);
+  // 念のため：ゲームの更新が止まっていても、一定時間で必ず消す
+  rouSafe = setTimeout(rouletteHide, ROULETTE_SPIN * 1000 + 4000);
   rouEl.classList.add('on');
   rouEl.classList.remove('done');
   const w = NET.players[ABIL.winner];
@@ -3828,7 +3837,8 @@ function rouletteResult(kind, winner) {
   else rouWho.innerHTML = mine
     ? who + ' → 他の全員に <b>' + ABIL_NAMES[kind] + '</b>'
     : who + ' の <b>' + ABIL_NAMES[kind] + '</b> を受けた';
-  setTimeout(() => { if (rouEl) rouEl.classList.remove('on'); }, 1500);
+  clearTimeout(rouTimer);
+  rouTimer = setTimeout(rouletteHide, 1500);
 }
 
 // ---------- 効果のHUD ----------
