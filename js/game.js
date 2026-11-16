@@ -35,10 +35,13 @@ const ROULETTE_SPIN = 1.6;    // ルーレットが回っている時間
 const ABIL_ZAP      = 5.0;    // 雷でしびれる秒数
 const ABIL_NOPAD    = 10.0;   // トランポリンに入れない秒数
 const ABIL_DARK     = 30.0;   // 暗闇の秒数
-const ABIL_NAMES    = ['雷', 'トランポリン封鎖', '暗闇'];
-const ABIL_LABELS   = ['THUNDER', 'NO TRAMPOLINE', 'BLACKOUT'];
-const ABIL_ICONS    = ['\u26A1', '\u26D4', '\u1F311'];
-const ABIL_COLORS   = ['#ffee44', '#ff8811', '#9966ff'];
+const ABIL_SUPER    = 10.0;   // トランポリンがすべてスーパートランポリンになる秒数
+const ABIL_NAMES    = ['雷', 'トランポリン封鎖', '暗闇', 'スーパートランポリン（自分）', 'スーパートランポリン（自分以外）'];
+const ABIL_LABELS   = ['THUNDER', 'NO TRAMPOLINE', 'BLACKOUT', 'SUPER ME', 'SUPER OTHERS'];
+const ABIL_ICONS    = ['\u26A1', '\u26D4', '\u1F311', '\u2B06', '\u2B06'];
+const ABIL_COLORS   = ['#ffee44', '#ff8811', '#9966ff', '#ffc400', '#ff5a9e'];
+const GEM_BACK      = 10.0;   // 取られたジェムが復活するまでの秒数
+const HELP_FAILS    = 3;      // 同じ場所でこの回数落ちたら、復帰地点にジェムを出す
 // 暗闇の見え方（近づかないと見えない濃さ）
 const DARK_FOG      = 0.045;
 const DARK_AMBIENT  = 0.16;
@@ -1451,6 +1454,7 @@ function updatePlayer(dt) {
         const q = padPos(pd);
         if (pd.plat !== p.on || Math.hypot(p.x - q.x, p.z - q.z) > pd.r) continue;
         let jv = pd.jv;
+        const sup = RACE.on && ABIL.superPad > 0 && pd.kind !== 'mega';
         if (pd.kind === 'bouncy' && p.impact > 4) {
           // 落ちてきた勢いをそのまま返し、さらに少し上乗せする
           jv = Math.max(jv, Math.sqrt(p.impact * p.impact + 2 * GRAVITY * pd.bonus));
@@ -1460,8 +1464,14 @@ function updatePlayer(dt) {
           showToast('SUPER JUMP!');
           playMega();
         }
+        if (sup) {
+          // 能力でスーパーになっている間は、いつもの3倍の高さ（15〜45m）まで跳ぶ
+          const rise = Math.min(45, Math.max(15, (jv * jv) / (2 * GRAVITY) * 3));
+          jv = Math.max(jv, Math.sqrt(2 * GRAVITY * rise));
+          showToast('SUPER JUMP!'); playMega();
+        }
         p.vy = jv; p.onGround = false; p.on = null; pd.anim = 1;
-        G.fovKick = pd.kind === 'normal' ? 1 : 1.6; playJump();
+        G.fovKick = (pd.kind === 'normal' && !sup) ? 1 : 1.6; playJump();
         break;
       }
     }
@@ -1519,6 +1529,7 @@ function respawnPlayer() {
   p.vy = 0; p.kx = 0; p.kz = 0; p.onGround = true; p.on = c.plat; p.boost = false;
   p.rope = null; p.ropeIdx = -1; p.f = 0; p.fling = false; p.ropeCD = 0; p.landedSince = true;
   p.yaw = c.yaw; p.respawnT = 0.7;
+  noteRespawn(p.cp);
   flash('rgba(120,200,255,.45)');
   playFall();
   showToast('もう一度！');
@@ -2071,6 +2082,7 @@ function buildStage(si, seed) {
     return { x: gm.x, y: gm.y, z: gm.z, obj: g2, got: false };
   });
   G.itemKind = 'dash';
+  G.helpGem = null; G.failCp = -1; G.failN = 0; G.padSuperVis = false;
   G.enemies = [];
   G.pads = [];
 
@@ -2159,6 +2171,16 @@ function updateCourse(dt) {
     });
   }
   CM.megaRing.opacity = 0.75;
+  // 能力でスーパーになっている間は、ふつうのトランポリンも金色に見せる
+  const supVis = RACE.on && ABIL.superPad > 0;
+  if (supVis !== !!G.padSuperVis) {
+    G.padSuperVis = supVis;
+    for (const pd of d.pads) {
+      if (!pd.mesh || (pd.kind && pd.kind !== 'normal' && pd.kind !== 'bouncy')) continue;
+      if (!pd.mat0) pd.mat0 = pd.mesh.material;
+      pd.mesh.material = supVis ? [CM.megaSide, CM.megaTop, CM.megaSide] : pd.mat0;
+    }
+  }
   for (const pd of d.pads) {
     const q = padPos(pd);
     pd.anim = Math.max(0, pd.anim - dt * 3);
@@ -2338,16 +2360,67 @@ function updateWaveUi() {
 }
 
 // ===================== 判定 =====================
+// ---------- ジェムの復活と、助けのジェム ----------
+function gemClock() { return RACE.on ? RACE.t : G.elapsed; }
+function gemTaken(pu) {
+  pu.got = true;
+  pu.backT = gemClock() + GEM_BACK;
+  if (pu.obj) pu.obj.visible = false;
+}
+function updateGems() {
+  const now = gemClock();
+  for (const pu of G.powerUps) {
+    if (pu.got && pu.backT !== undefined && now >= pu.backT) {
+      pu.got = false; pu.backT = undefined;
+      if (pu.obj) { pu.obj.visible = true; pu.pop = 1; }
+    }
+  }
+  const h = G.helpGem;
+  if (h && h.got && now >= h.backT) { h.got = false; h.obj.visible = true; h.pop = 1; }
+}
+// 同じチェックポイントから何度もやり直しているとき、その場所にジェムを置く（本人にだけ見える）
+function noteRespawn(cp) {
+  if (G.failCp === cp) G.failN++; else { G.failCp = cp; G.failN = 1; removeHelpGem(); }
+  if (G.failN >= HELP_FAILS && !G.helpGem) {
+    const c = G.d.cps[cp];
+    const fx = -Math.sin(c.yaw), fz = -Math.cos(c.yaw);
+    const x = c.x + fx * 2.6, z = c.z + fz * 2.6;
+    const g2 = new THREE.Group();
+    g2.add(new THREE.Mesh(GEO.octa, MAT.star));
+    const gl = glowSprite(0xff6fd8, 3.4); gl.material.opacity = 0.7; g2.add(gl);
+    g2.position.set(x, c.y + 1.1, z);
+    G.group.add(g2);
+    G.helpGem = { x: x, y: c.y, z: z, obj: g2, got: false, cp: cp, pop: 1 };
+    showToast('ジェムが出た！');
+  }
+}
+function removeHelpGem() {
+  const h = G.helpGem;
+  if (!h) return;
+  if (h.obj && h.obj.parent) h.obj.parent.remove(h.obj);
+  G.helpGem = null;
+}
+
 function checkPowerUps() {
   const p = G.player;
+  updateGems();
+  const h = G.helpGem;
+  if (h && G.player.cp !== h.cp) { removeHelpGem(); G.failN = 0; }
+  else if (h && !h.got) {
+    const dx = h.x - p.x, dz = h.z - p.z;
+    if (Math.abs(h.y - p.y) <= 2.4 && dx * dx + dz * dz <= 1.6 * 1.6) {
+      h.got = true; h.backT = gemClock() + GEM_BACK; h.obj.visible = false;
+      if (RACE.on) raceWantItem(-1);
+      else { p.dash = Math.max(p.dash, DASH_DUR); playPower(); }
+    }
+  }
   for (const pu of G.powerUps) {
     if (pu.got) continue;
     const dx = pu.x - p.x, dz = pu.z - p.z;
     if (Math.abs(pu.y - p.y) > 2.4) continue;
     if (dx * dx + dz * dz > 1.6 * 1.6) continue;
     if (RACE.on) { raceWantItem(G.powerUps.indexOf(pu)); continue; }
-    pu.got = true;
-    pu.obj.visible = false;
+    gemTaken(pu);
     p.dash = Math.max(p.dash, DASH_DUR);
     playPower();
     updateHUD();
@@ -2396,11 +2469,12 @@ function syncCamera(dt) {
 function updateVisuals(dt, now) {
   updateWaveFx(dt);
   if (G.gears) for (const gr of G.gears) gr.m.rotation.z += gr.spd * dt;
-  for (const pu of G.powerUps) {
+  for (const pu of G.helpGem ? G.powerUps.concat([G.helpGem]) : G.powerUps) {
     if (pu.got) continue;
     pu.obj.rotation.y += dt * 2.2;
     pu.obj.rotation.x += dt * 1.1;
     pu.obj.position.y = pu.y + 1.1 + Math.sin(now / 340) * 0.18;
+    if (pu.pop > 0) { pu.pop = Math.max(0, pu.pop - dt * 3); pu.obj.scale.setScalar(1 - pu.pop * 0.9); }   // ぽんと現れる
   }
 
   // パワー中の画面色
@@ -2951,9 +3025,10 @@ const SPEC = { on: false, target: -1 };
 // ジェムのルーレットと、自分にかかっている妨害効果
 const ABIL = {
   spin: 0, spinKind: 0, winner: -1,   // ルーレット演出
-  zap: 0, nopad: 0, dark: 0           // 自分が受けている効果の残り秒数
+  zap: 0, nopad: 0, dark: 0,          // 自分が受けている効果の残り秒数
+  superPad: 0                         // 自分のトランポリンがスーパーになっている残り秒数
 };
-function abilReset() { ABIL.spin = 0; ABIL.winner = -1; ABIL.zap = 0; ABIL.nopad = 0; ABIL.dark = 0; applyDarkness(); }
+function abilReset() { ABIL.spin = 0; ABIL.winner = -1; ABIL.zap = 0; ABIL.nopad = 0; ABIL.dark = 0; ABIL.superPad = 0; applyDarkness(); }
 
 const r2 = (v) => Math.round(v * 100) / 100;
 const r1 = (v) => Math.round(v * 10) / 10;
@@ -3023,7 +3098,10 @@ function applyPlayerList(a) {
     q.name = row[1]; q.total = row[2];
     if (row.length > 3) { q.lives = row[3]; q.out = !!row[4]; }
     if (row.length > 5) q.skin = skinIndex(row[5]);
-    if (slot === NET.slot && row.length > 5) MY_SKIN.v = q.skin;
+    if (slot === NET.slot && row.length > 5) {
+      if (MY_SKIN.v !== q.skin && MY_SKIN.want !== false) skinMsg('ほかの人と同じキャラだったので「' + SKIN_NAMES[q.skin] + '」になりました');
+      MY_SKIN.v = q.skin;
+    }
     keep[slot] = true;
   }
   for (let i = 0; i < MAX_PLAYERS; i++) {
@@ -3151,7 +3229,8 @@ function hostAccept(conn) {
     conn._slot = slot;
     NET.conns[slot] = conn;
     const nm = (conn.metadata && conn.metadata.name) ? String(conn.metadata.name).slice(0, 8) : PNAMES[slot];
-    addPlayer(slot, nm, conn.metadata && conn.metadata.skin);
+    // キャラかぶりはさせない：希望のキャラが使われていたら空いているキャラにする
+    addPlayer(slot, nm, freeSkin(conn.metadata && conn.metadata.skin, slot));
     send(conn, { t: 'welcome', slot: slot, list: playerList() });
     hostBroadcast({ t: 'lobby', list: playerList() }, slot);
     lobbyRefresh();
@@ -3573,7 +3652,7 @@ function showGoalBanner() {
 
 // ---------- アイテム（ダッシュ） ----------
 function raceWantItem(i) {
-  if (i < 0) return;
+  if (i < -1) return;                              // -1 は「助けのジェム」（自分だけに出る）
   const now = RACE.t;
   if (RACE.reqT[i] !== undefined && now - RACE.reqT[i] < 0.5) return;
   RACE.reqT[i] = now;
@@ -3582,21 +3661,43 @@ function raceWantItem(i) {
 }
 
 function hostGrantItem(i, slot) {
-  const pu = G.powerUps[i];
-  if (!pu || pu.got) return;
-  pu.got = true;
-  const kind = Math.floor(Math.random() * 3);      // 0=雷 1=トランポリン封鎖 2=暗闇
+  if (i !== -1) {
+    const pu = G.powerUps[i];
+    if (!pu || pu.got) return;
+    pu.got = true;
+  }
+  const kind = pickAbility(slot);
   hostBroadcast({ t: 'got', i: i, slot: slot, k: kind });
   applyItem(i, slot, kind);
 }
 
+// ルーレットの中身を決める。0=雷 1=トランポリン封鎖 2=暗闇 3=スーパー（自分） 4=スーパー（自分以外）
+// 下位ほど 3、上位ほど 4 が出やすい。3と4を合わせた確率は人数で決まる（2人40%〜6人60%）
+function abilityOdds(slot) {
+  const list = racers().slice();
+  const n = list.length;
+  list.sort((x, y) => {
+    if (x.fin !== y.fin) return x.fin ? -1 : 1;
+    return prog(y) - prog(x);
+  });
+  const r = Math.max(0, list.findIndex(q => q.slot === slot));
+  const pmax = Math.min(0.6, Math.max(0.4, 0.4 + (n - 2) * 0.05));
+  const t = n > 1 ? r / (n - 1) : 0;               // 0=1位 〜 1=最下位
+  const pSelf = pmax * t, pOthers = pmax * (1 - t), rest = (1 - pmax) / 3;
+  return [rest, rest, rest, pSelf, pOthers];
+}
+function pickAbility(slot) {
+  const odds = abilityOdds(slot);
+  let u = Math.random();
+  for (let k = 0; k < odds.length; k++) { if (u < odds[k]) return k; u -= odds[k]; }
+  return 0;
+}
+
 // ジェムを取ると、スピードアップは即座に、能力はルーレットが止まってから発動する
 function applyItem(i, slot, kind) {
-  const pu = G.powerUps[i];
-  if (pu) {
-    pu.got = true;
-    if (pu.obj) pu.obj.visible = false;
-  }
+  const pu = i >= 0 ? G.powerUps[i] : null;
+  if (pu) gemTaken(pu);
+  if (i === -1 && slot === NET.slot) removeHelpGem();
   if (slot === NET.slot && !SPEC.on) { G.player.dash = DASH_DUR; playPower(); }
   ABIL.spin = ROULETTE_SPIN;
   ABIL.winner = slot;
@@ -3608,8 +3709,15 @@ function applyItem(i, slot, kind) {
 function abilFire(kind, winner) {
   const mine = (winner === NET.slot);
   rouletteResult(kind, winner);
-  if (mine || SPEC.on) return;                     // 取った本人と観戦者には効かない
-  if (kind === 0) {
+  if (SPEC.on) return;                             // 観戦者には効かない
+  if (kind === 3) {                                // 取った本人のトランポリンがスーパーに
+    if (mine) superPadOn();
+    return;
+  }
+  if (mine) return;                                // ほかの能力は、取った本人には効かない
+  if (kind === 4) {
+    superPadOn();
+  } else if (kind === 0) {
     ABIL.zap = ABIL_ZAP;
     G.player.stun = Math.max(G.player.stun, ABIL_ZAP);
     G.player.dash = 0;
@@ -3628,7 +3736,13 @@ function abilFire(kind, winner) {
 }
 
 // 効果時間の経過
+function superPadOn() {
+  ABIL.superPad = ABIL_SUPER;
+  flash('rgba(255,200,0,.35)');
+  playMega();
+}
 function abilTick(dt) {
+  if (ABIL.superPad > 0) ABIL.superPad = Math.max(0, ABIL.superPad - dt);
   if (ABIL.spin > 0) {
     ABIL.spin -= dt;
     rouletteSpinFrame();
@@ -3694,7 +3808,7 @@ function rouletteShow() {
 function rouletteSpinFrame() {
   if (!rouEl) return;
   rouFrame++;
-  const k = Math.floor(rouFrame / 4) % 3;         // 高速で切り替わる演出
+  const k = Math.floor(rouFrame / 4) % ABIL_LABELS.length;   // 高速で切り替わる演出
   rouIcon.textContent = ABIL_LABELS[k].charAt(0);
   rouName.textContent = ABIL_LABELS[k];
   rouName.style.color = ABIL_COLORS[k];
@@ -3709,7 +3823,9 @@ function rouletteResult(kind, winner) {
   rouEl.classList.add('done');
   const w = NET.players[winner];
   const who = w ? '<span style="color:' + PCOLORS_CSS[w.slot] + '">' + escapeHtml(w.name) + '</span>' : '?';
-  rouWho.innerHTML = mine
+  if (kind === 3) rouWho.innerHTML = mine ? who + ' のトランポリンが <b>' + ABIL_SUPER + '秒間スーパー</b> に！' : who + ' のトランポリンが <b>スーパー</b> に';
+  else if (kind === 4) rouWho.innerHTML = mine ? who + ' → 他の全員のトランポリンが <b>スーパー</b> に' : who + ' のせいで、トランポリンが <b>' + ABIL_SUPER + '秒間スーパー</b> に';
+  else rouWho.innerHTML = mine
     ? who + ' → 他の全員に <b>' + ABIL_NAMES[kind] + '</b>'
     : who + ' の <b>' + ABIL_NAMES[kind] + '</b> を受けた';
   setTimeout(() => { if (rouEl) rouEl.classList.remove('on'); }, 1500);
@@ -3723,6 +3839,7 @@ function abilHud() {
   if (ABIL.zap > 0)   out.push('<span style="color:' + ABIL_COLORS[0] + '">' + ABIL_LABELS[0] + ' ' + ABIL.zap.toFixed(1) + '</span>');
   if (ABIL.nopad > 0) out.push('<span style="color:' + ABIL_COLORS[1] + '">' + ABIL_LABELS[1] + ' ' + ABIL.nopad.toFixed(1) + '</span>');
   if (ABIL.dark > 0)  out.push('<span style="color:' + ABIL_COLORS[2] + '">' + ABIL_LABELS[2] + ' ' + ABIL.dark.toFixed(1) + '</span>');
+  if (ABIL.superPad > 0) out.push('<span style="color:' + ABIL_COLORS[3] + '">SUPER JUMP ' + ABIL.superPad.toFixed(1) + '</span>');
   abilEl.innerHTML = out.join('　');
   abilEl.classList.toggle('on', out.length > 0);
 }
@@ -3734,7 +3851,8 @@ function hostHandle(slot, m) {
   if (!q) return;
   if (m.t === 'skin') {
     if (RACE.phase === 'count' || RACE.phase === 'run') return;   // レース中は変えられない
-    q.skin = skinIndex(m.k);
+    const k = skinIndex(m.k);
+    if (!skinOwner(k, slot)) q.skin = k;                          // ほかの人が使っていたら変えない（一覧を送り直して元に戻させる）
     hostBroadcast({ t: 'lobby', list: playerList() });
     lobbyRefresh();
     return;
@@ -4142,8 +4260,29 @@ function charDispose(c) {
 }
 
 // ---------- キャラ選択（タイトル画面とロビー） ----------
+// 対戦ルームの中で、そのキャラをほかの人が使っているか
+function skinOwner(k, exceptSlot) {
+  if (typeof NET === 'undefined' || !NET.on) return null;
+  return NET.players.find(q => q && q.slot !== exceptSlot && q.skin === k) || null;
+}
+// 希望のキャラが使われていたら、空いているキャラを返す（6体いるので必ず空きがある）
+function freeSkin(pref, exceptSlot) {
+  pref = skinIndex(pref);
+  if (!skinOwner(pref, exceptSlot)) return pref;
+  for (let i = 1; i <= SKIN_NAMES.length; i++) { const k = (pref + i) % SKIN_NAMES.length; if (!skinOwner(k, exceptSlot)) return k; }
+  return pref;
+}
+function skinMsg(t) {
+  const el = document.getElementById('skinMsg');
+  if (!el) return;
+  el.textContent = t;
+  clearTimeout(skinMsg.t);
+  if (t) skinMsg.t = setTimeout(() => { el.textContent = ''; }, 3500);
+}
 function setMySkin(k) {
   k = skinIndex(k);
+  const own = NET.on ? skinOwner(k, NET.slot) : null;
+  if (own) { skinMsg('「' + SKIN_NAMES[k] + '」は ' + own.name + ' さんが選んでいます'); return; }
   MY_SKIN.v = k;
   try { localStorage.setItem('tc3d_skin', String(k)); } catch (e) {}
   if (NET.on) {
@@ -4168,7 +4307,12 @@ function renderSkinPickers() {
         box.appendChild(b);
       });
     }
-    Array.from(box.children).forEach((b, k) => b.classList.toggle('on', k === MY_SKIN.v));
+    Array.from(box.children).forEach((b, k) => {
+      b.classList.toggle('on', k === MY_SKIN.v);
+      const own = (NET.on && id === 'skinPick2') ? skinOwner(k, NET.slot) : null;
+      b.classList.toggle('taken', !!own);
+      if (own) b.dataset.who = own.name; else delete b.dataset.who;
+    });
   }
 }
 
