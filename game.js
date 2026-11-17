@@ -2534,21 +2534,21 @@ function updateHUDLive() {
 const BGM_LOOP_SEC = 118.783;   // 48小節ちょうど（曲の頭から最後までを丸ごとループ）
 const BGM_VOL = 0.8;
 
+// ===================== 音 =====================
+// 方針（iPhone・アプリ内ブラウザでの不具合をふまえて作り直したもの）
+//  1. 音はすべて Web Audio だけで鳴らす。<audio> 要素は使わない。
+//     iPhone では <audio> は「再生中のメディア」として扱われ、アプリを閉じても鳴り続けることがある。
+//  2. 音を出す仕組み（AudioContext）は、画面を触ったりキーを押したりしたときに作る。
+//     iPhone やアプリ内ブラウザでは、操作の前には作れない・鳴らせないことがあるため。
+//  3. iPhone には「ゲームの効果音」として扱ってもらう（ambient）。ほかのアプリの音楽を止めず、
+//     消音スイッチにも従い、裏に回ったら鳴らない種類の音になる。
+//  4. ページが見えなくなったら止め（suspend）、ページを離れるときは仕組みごと捨てる（close）。
+//  5. BGMは1ページにつき必ず1本だけ。
 let muted = false;
 let audioCtx = null;
 const BUF = { bgm: null, jump: null, goal: null };
-let bgmSrc = null, bgmGain = null, bgmWant = false, bgmFallback = null;
-let audioInit = false;
-
-function ac() {
-  if (!audioCtx) {
-    const C = window.AudioContext || window.webkitAudioContext;
-    if (!C) return null;
-    try { audioCtx = new C(); } catch (e) { return null; }
-  }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
-  return audioCtx;
-}
+let bgmSrc = null, bgmGain = null, bgmWant = false;
+let audioLoading = false;
 
 function b64ToArrayBuffer(b64) {
   const bin = atob(b64);
@@ -2556,103 +2556,95 @@ function b64ToArrayBuffer(b64) {
   for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
   return u8.buffer;
 }
+// 音のデータを取り出す（assets/audio/ から読み込む）
+function soundData(key) {
+  return fetch('assets/audio/' + key + '.mp3').then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); });
+}
 
-function initAudio() {
-  if (audioInit) return;
-  const a = ac();
-  if (!a) { initFallback(); return; }
-  audioInit = true;
-  const jobs = [['jump', 'assets/audio/jump.mp3'], ['goal', 'assets/audio/goal.mp3'], ['bgm', 'assets/audio/bgm.mp3']];
-  for (const job of jobs) {
-    fetch(job[1])
-      .then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
-      .then(ab => a.decodeAudioData(ab,
-        (buf) => { BUF[job[0]] = buf; if (job[0] === 'bgm' && bgmWant) startBGM(); },
-        () => { if (job[0] === 'bgm') initFallback(); }))
-      .catch(() => { if (job[0] === 'bgm') initFallback(); });
+// 操作のたびに呼ぶ：音の仕組みを用意して、止まっていれば再開する
+function ac() {
+  if (document.hidden) return audioCtx;
+  if (!audioCtx || audioCtx.state === 'closed') {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return null;
+    try { if (navigator.audioSession) navigator.audioSession.type = 'ambient'; } catch (e) {}
+    try { audioCtx = new C(); } catch (e) { audioCtx = null; return null; }
+    bgmSrc = null; bgmGain = null;
   }
+  if (audioCtx.state !== 'running') { try { const pr = audioCtx.resume(); if (pr && pr.catch) pr.catch(() => {}); } catch (e) {} }
+  loadSounds();
+  if (bgmWant) startBGM();
+  return audioCtx;
+}
+// 効果音用：鳴らせる状態のときだけ返す（ここでは作らない）
+function sfxCtx() {
+  return (audioCtx && audioCtx.state === 'running' && !document.hidden) ? audioCtx : null;
 }
 
-// Web Audio が使えない環境向けの保険
-function initFallback() {
-  if (bgmFallback) return;
-  try {
-    bgmFallback = new Audio('assets/audio/bgm.mp3');
-    bgmFallback.loop = true;
-    bgmFallback.volume = BGM_VOL;
-  } catch (e) {}
-}
-
-// MP3のデコーダ遅延で先頭に無音が付く場合があるため、実音の開始位置を測る
-function firstSound(buf) {
-  const ch = buf.getChannelData(0);
-  const n = Math.min(ch.length, Math.floor(buf.sampleRate * 2));
-  for (let i = 0; i < n; i++) if (Math.abs(ch[i]) > 0.002) return i / buf.sampleRate;
-  return 0;
+function loadSounds() {
+  if (audioLoading || !audioCtx) return;
+  audioLoading = true;
+  const a = audioCtx;
+  for (const key of ['jump', 'goal', 'bgm']) {
+    soundData(key).then(ab => new Promise((ok, ng) => {
+      // 古い Safari は Promise を返さないので、コールバックでも受け取る
+      const pr = a.decodeAudioData(ab, ok, ng);
+      if (pr && pr.then) pr.then(ok, ng);
+    })).then(buf => {
+      BUF[key] = buf;
+      if (key === 'bgm' && bgmWant) startBGM();
+    }).catch(() => { audioLoading = false; });
+  }
 }
 
 // --- BGM: タイトルからゲームオーバーまで途切れさせない ---
-// BGMは必ず1本だけ。Web Audio と予備の<audio>のどちらか片方しか鳴らさない
-function fallbackPlaying() { return !!(bgmFallback && !bgmFallback.paused); }
 function startBGM() {
   bgmWant = true;
-  if (muted || document.hidden) return;            // 裏で開かれているページ（先読みなど）では鳴らさない
-  if (bgmSrc) return;
-  if (fallbackPlaying()) return;                   // すでに予備の<audio>で鳴っているなら、それを使い続ける
-  const a = ac();
-  if (!a) {
-    initFallback();
-    if (bgmFallback) { const pr = bgmFallback.play(); if (pr && pr.catch) pr.catch(() => {}); }
-    return;
-  }
-  if (!BUF.bgm) { initAudio(); return; }
-  if (bgmFallback) { try { bgmFallback.pause(); } catch (e) {} }
-
-  const off = 0;                     // 頭の休符も曲の一部なので削らない
+  const a = audioCtx;
+  if (!a || a.state === 'closed' || !BUF.bgm || bgmSrc || document.hidden) return;
   bgmGain = a.createGain();
-  bgmGain.gain.value = bgmLevel();
+  bgmGain.gain.value = muted ? 0 : BGM_VOL;
   bgmGain.connect(a.destination);
-
   bgmSrc = a.createBufferSource();
   bgmSrc.buffer = BUF.bgm;
   bgmSrc.loop = true;
-  bgmSrc.loopStart = off;
-  bgmSrc.loopEnd = Math.min(off + BGM_LOOP_SEC, BUF.bgm.duration);
+  bgmSrc.loopStart = 0;                                       // 頭の休符も曲の一部なので削らない
+  bgmSrc.loopEnd = Math.min(BGM_LOOP_SEC, BUF.bgm.duration);
   bgmSrc.connect(bgmGain);
-  bgmSrc.start(0, off);
+  bgmSrc.start(0, 0);
+}
+function stopBGM() {
+  if (bgmSrc) { try { bgmSrc.stop(); } catch (e) {} try { bgmSrc.disconnect(); } catch (e) {} }
+  if (bgmGain) { try { bgmGain.disconnect(); } catch (e) {} }
+  bgmSrc = null; bgmGain = null;
+}
+// ページを離れる・捨てられるとき：音の仕組みごと片づける（次に操作したとき作り直す）
+function closeAudio() {
+  stopBGM();
+  if (audioCtx) { const c = audioCtx; audioCtx = null; try { c.close(); } catch (e) {} }
+  audioLoading = false;
 }
 
-// --- 見えていないページは音を止め、表示されたら続きから鳴らす ---
-function bgmLevel() { return muted ? 0 : BGM_VOL; }
-function bgmApply() {
-  if (bgmGain) bgmGain.gain.value = bgmLevel();
-  if (bgmFallback) bgmFallback.muted = muted;
-}
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    if (audioCtx && audioCtx.state === 'running') audioCtx.suspend();
-    if (bgmFallback) bgmFallback.pause();
-  } else {
-    if (audioCtx) audioCtx.resume();
-    if (bgmFallback && bgmWant && !bgmSrc && !muted && bgmFallback.paused && bgmFallback.currentTime > 0) { const pr = bgmFallback.play(); if (pr && pr.catch) pr.catch(() => {}); }
-    if (bgmWant && !bgmSrc && !fallbackPlaying()) startBGM();
+    if (audioCtx && audioCtx.state === 'running') { try { audioCtx.suspend(); } catch (e) {} }
+  } else if (audioCtx) {
+    try { const pr = audioCtx.resume(); if (pr && pr.catch) pr.catch(() => {}); } catch (e) {}   // 再開できないときは、次の操作で再開
+    if (bgmWant) startBGM();
   }
 });
-window.addEventListener('pagehide', () => {
-  if (audioCtx && audioCtx.state === 'running') audioCtx.suspend();
-  if (bgmFallback) bgmFallback.pause();
-});
+window.addEventListener('pagehide', closeAudio);
+document.addEventListener('freeze', closeAudio);
 
-initAudio();
-startBGM();
-// 自動再生がブロックされた場合は最初の操作で開始
-['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
-  window.addEventListener(ev, () => { ac(); initAudio(); startBGM(); }, { passive: true }));
+bgmWant = true;
+// 音は最初の操作から（iPhone は touchend / click のときでないと鳴らせない）
+['pointerdown', 'pointerup', 'touchend', 'click', 'keydown'].forEach(ev =>
+  window.addEventListener(ev, () => { ac(); }, { passive: true, capture: true }));
 
 function toggleMute() {
   muted = !muted;
-  if (!muted) { ac(); if (!bgmSrc) startBGM(); }
-  bgmApply();
+  if (!muted) ac();
+  if (bgmGain) bgmGain.gain.value = muted ? 0 : BGM_VOL;
 }
 
 // --- 効果音 ---
@@ -2660,7 +2652,7 @@ function playBuf(key, vol) {
   if (muted) return;
   const v = Math.max(0, Math.min(1, vol));
   if (v <= 0.01) return;
-  const a = ac();
+  const a = sfxCtx();
   if (!a || !BUF[key]) return;
   const s = a.createBufferSource();
   s.buffer = BUF[key];
@@ -2684,7 +2676,7 @@ function playGoal()     { playBuf('goal', 0.85); }
 // --- 合成音（着地・パワーアップ・撃破・ミス）---
 function tone(type, f0, f1, dur, vol) {
   if (muted) return;
-  const a = ac(); if (!a) return;
+  const a = sfxCtx(); if (!a) return;
   const t = a.currentTime;
   const o = a.createOscillator(), g = a.createGain();
   o.type = type;
